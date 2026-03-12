@@ -1,0 +1,37 @@
+# credentials / secrets
+.env
+.env.*
+.env.local
+*.env
+docs/deployment.md
+
+# python
+__pycache__/
+*.pyc
+*.pyo
+notebook/.venv/
+
+# node
+node_modules/
+lastmile-app/.next/
+lastmile-app/snowflake.log
+lastmile-app/tsconfig.tsbuildinfo
+lastmile-app/next-env.d.ts
+
+# os
+.DS_Store
+Thumbs.db
+
+# ide
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# build artifacts
+lastmile-app/build/
+lastmile-app/out/
+
+# work-in-progress memos (keep in local only)
+add_request.md
+lastmile-app/add_request.md
