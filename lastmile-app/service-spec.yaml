@@ -18,6 +18,7 @@ spec:
       NEXT_PUBLIC_MAP_CENTER_LAT: "35.6495"
       NEXT_PUBLIC_MAP_CENTER_LNG: "139.7914"
       NEXT_PUBLIC_MAP_ZOOM: "13"
+      OSRM_URL: "http://localhost:5000"
     secrets:
     - snowflakeSecret: LASTMILE_DB.SPCS.SNOWFLAKE_PAT_SECRET
       secretKeyRef: secret_string
@@ -38,6 +39,18 @@ spec:
     readinessProbe:
       port: 8080
       path: /
+  - name: osrm
+    image: /lastmile_db/spcs/lastmile_repo/osrm-kanto:latest
+    resources:
+      requests:
+        memory: 2Gi
+        cpu: 1000m
+      limits:
+        memory: 4Gi
+        cpu: 2000m
+    readinessProbe:
+      port: 5000
+      path: /nearest/v1/driving/139.79,35.64
   endpoints:
   - name: lastmile-web
     port: 8080

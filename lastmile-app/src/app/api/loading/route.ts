@@ -5,7 +5,9 @@ interface LoadingItem {
   package_id: string;
   driver_id: string;
   driver_name: string;
+  trip_number: number;
   stop_order: number;
+  loading_order: number;
   address: string;
   weight: number;
   volume: number;
@@ -32,7 +34,9 @@ export async function GET(request: Request) {
          p.package_id,
          ds.driver_id,
          d.name AS driver_name,
-         ROW_NUMBER() OVER(PARTITION BY ds.driver_id ORDER BY p.package_id)::int AS stop_order,
+         ds.trip_number,
+         ds.stop_order,
+         (MAX(ds.stop_order) OVER(PARTITION BY ds.driver_id, ds.trip_number) - ds.stop_order + 1)::int AS loading_order,
          p.address,
          p.weight,
          p.volume,
@@ -43,8 +47,9 @@ export async function GET(request: Request) {
        JOIN drivers d ON d.driver_id = ds.driver_id
        JOIN packages p ON p.package_id = ds.package_id AND p.date = ds.date
        WHERE ds.date = $1
+         AND ds.status IN ('assigned', 'loaded')
          ${whereExtra}
-       ORDER BY ds.driver_id, stop_order`,
+       ORDER BY ds.driver_id, ds.trip_number, loading_order`,
       params
     );
     return NextResponse.json(rows);

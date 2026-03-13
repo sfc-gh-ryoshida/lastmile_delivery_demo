@@ -12,56 +12,56 @@
 INSERT INTO road_construction (h3_index, center_lat, center_lng, radius_m, start_date, end_date, restriction_type, description)
 VALUES
 (
-    h3_latlng_to_cell(point(35.6450, 139.7920), 9),
+    h3_latlng_to_cell(point(139.7920, 35.6450), 9),
     35.6450, 139.7920, 120,
     CURRENT_DATE - 2, CURRENT_DATE + 3,
     'lane_closure',
     '豊洲大橋付近 車線規制（下水管更新工事）'
 ),
 (
-    h3_latlng_to_cell(point(35.6400, 139.7950), 9),
+    h3_latlng_to_cell(point(139.7950, 35.6400), 9),
     35.6400, 139.7950, 80,
     CURRENT_DATE - 1, CURRENT_DATE + 2,
     'road_closure',
     '東雲キャナル通り 全面通行止め（電線地中化工事）'
 ),
 (
-    h3_latlng_to_cell(point(35.6380, 139.8050), 9),
+    h3_latlng_to_cell(point(139.8050, 35.6380), 9),
     35.6380, 139.8050, 100,
     CURRENT_DATE, CURRENT_DATE + 7,
     'road_closure',
     '東雲交差点 全面通行止め（ガス管工事）'
 ),
 (
-    h3_latlng_to_cell(point(35.6520, 139.7880), 9),
+    h3_latlng_to_cell(point(139.7880, 35.6520), 9),
     35.6520, 139.7880, 150,
     CURRENT_DATE - 3, CURRENT_DATE + 1,
     'lane_closure',
     '晴海通り 片側規制（歩道拡幅工事）'
 ),
 (
-    h3_latlng_to_cell(point(35.6440, 139.8100), 9),
+    h3_latlng_to_cell(point(139.8100, 35.6440), 9),
     35.6440, 139.8100, 200,
     CURRENT_DATE, CURRENT_DATE + 14,
     'lane_closure',
     '辰巳団地前 車線規制（水道管交換工事）'
 ),
 (
-    h3_latlng_to_cell(point(35.6350, 139.7920), 9),
+    h3_latlng_to_cell(point(139.7920, 35.6350), 9),
     35.6350, 139.7920, 90,
     CURRENT_DATE - 1, CURRENT_DATE + 5,
     'detour',
     '有明テニスの森駅前 迂回路設定（マンション建設搬入）'
 ),
 (
-    h3_latlng_to_cell(point(35.6420, 139.8100), 9),
+    h3_latlng_to_cell(point(139.8100, 35.6420), 9),
     35.6420, 139.8100, 150,
     CURRENT_DATE + 1, CURRENT_DATE + 5,
     'lane_closure',
     '辰巳橋付近 車線規制（水道管工事）'
 ),
 (
-    h3_latlng_to_cell(point(35.6480, 139.7850), 9),
+    h3_latlng_to_cell(point(139.7850, 35.6480), 9),
     35.6480, 139.7850, 100,
     CURRENT_DATE + 1, CURRENT_DATE + 3,
     'road_closure',
@@ -83,7 +83,7 @@ SELECT
     MIN(spd)
 FROM (
     SELECT
-        h3_latlng_to_cell(point(lat, lng), 7) AS h3_cell,
+        h3_latlng_to_cell(point(lng, lat), 7) AS h3_cell,
         ts,
         CASE
             WHEN lat BETWEEN 35.636 AND 35.643 AND lng BETWEEN 139.790 AND 139.800

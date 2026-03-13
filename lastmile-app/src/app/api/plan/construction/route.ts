@@ -10,8 +10,8 @@ export async function GET(request: Request) {
     const rows = await pgQuery<RoadConstruction>(
       `SELECT construction_id, h3_index::text AS h3_index, center_lat, center_lng,
               radius_m, start_date, end_date, restriction_type, description
-       FROM road_construction
-       WHERE start_date <= $1 AND (end_date IS NULL OR end_date >= $1)`,
+         FROM road_construction
+         WHERE start_date <= $1 AND (end_date IS NULL OR end_date >= $1)`,
       [date]
     );
     return NextResponse.json(rows);

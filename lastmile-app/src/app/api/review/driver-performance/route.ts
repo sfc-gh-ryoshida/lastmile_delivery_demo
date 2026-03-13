@@ -18,13 +18,16 @@ export async function GET(request: Request) {
           COUNT(*) FILTER (WHERE ds.status = 'delivered')::numeric
           / NULLIF(COUNT(ds.package_id), 0) * 100, 1
         )::float AS completion_rate,
-        r.total_distance,
-        r.total_time_est
+        ra.total_distance,
+        ra.total_time_est
       FROM drivers d
       LEFT JOIN delivery_status ds ON ds.driver_id = d.driver_id AND ds.date = $1
-      LEFT JOIN routes r ON r.driver_id = d.driver_id AND r.date = $1
+      LEFT JOIN (
+        SELECT driver_id, SUM(total_distance) AS total_distance, SUM(total_time_est) AS total_time_est
+        FROM routes WHERE date = $1 GROUP BY driver_id
+      ) ra ON ra.driver_id = d.driver_id
       WHERE d.is_active = true
-      GROUP BY d.driver_id, d.name, d.area_assignment, r.total_distance, r.total_time_est
+      GROUP BY d.driver_id, d.name, d.area_assignment, ra.total_distance, ra.total_time_est
       ORDER BY completion_rate DESC NULLS LAST`,
       [date]
     );

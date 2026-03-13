@@ -99,16 +99,16 @@ async function generateDemoData(date: string) {
         ELSE NULL
       END,
       ROUND((1.0 + random() * 14.0)::numeric, 1),
-      ROUND((0.5 + random() * 9.5)::numeric, 1),
+      ROUND((0.005 + random() * 0.095)::numeric, 3),
       random() < 0.07,
       src.recipient_type,
       NULL, NULL, NULL, NOW()
     FROM (
-      SELECT DISTINCT ON (address) address, lat, lng, h3_index, recipient_type
+      SELECT address, lat, lng, h3_index, recipient_type
       FROM packages
-      WHERE date < $1::date
-      ORDER BY address, random()
-      LIMIT 490
+      WHERE date = (SELECT MIN(date) FROM packages)
+      ORDER BY random()
+      LIMIT 590
     ) src
   `, [date, dateShort]);
 

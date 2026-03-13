@@ -27,6 +27,9 @@ pg_lake/
 │   ├── requirements.txt
 │   └── app/
 ├── react/                              # Phase 4: React 所長アプリ (スキルで構築)
+├── osrm/                              # OSRM サイドカー (道路距離エンジン)
+│   ├── Dockerfile                     # osrm-backend v5.27.1, MLD, 関東BBOX抽出
+│   └── build.sh                       # ビルドヘルパー
 ├── streamlit/                          # Phase 5: Streamlit in Snowflake
 └── notebook/                           # Phase 3: ML 開発 Notebook
 ```
@@ -170,15 +173,15 @@ SELECT route_id, driver_id, stop_count FROM routes WHERE date = CURRENT_DATE + 1
 -- 期待: 12行
 
 -- H3 動作確認
-SELECT h3_lat_lng_to_cell(35.6495, 139.7914, 9);
+SELECT h3_latlng_to_cell(point(139.7914, 35.6495), 9);
 -- H3 セルが返ること
 
 -- h3_postgis 動作確認
-SELECT ST_AsText(h3_cell_to_boundary_geometry(h3_lat_lng_to_cell(35.6495, 139.7914, 9)));
+SELECT ST_AsText(h3_cell_to_boundary_geometry(h3_latlng_to_cell(point(139.7914, 35.6495), 9)));
 -- POLYGON が返ること
 
 -- h3_grid_disk 動作確認
-SELECT h3_grid_disk(h3_lat_lng_to_cell(35.6495, 139.7914, 9), 1);
+SELECT h3_grid_disk(h3_latlng_to_cell(point(139.7914, 35.6495), 9), 1);
 -- 7セルの配列が返ること
 ```
 
@@ -228,8 +231,29 @@ SELECT * FROM demand_forecast ORDER BY date;
 -- 期待: 7行 (翌週分)
 
 -- H3 関数確認
-SELECT H3_POINT_TO_CELL_STRING(35.6495, 139.7914, 9);
+SELECT H3_LATLNG_TO_CELL_STRING(35.6495, 139.7914, 9);
 ```
+
+#### H3 解像度マップ
+
+| テーブル | カラム | 解像度 | 備考 |
+|----------|--------|--------|------|
+| DELIVERY_HISTORY | H3_INDEX_R9 | R9 | 配送ベース (Postgres h3_index と同値) |
+| RISK_SCORES | H3_INDEX | R9 | SP_RECALC_RISK_SCORES が DH.R9 をそのまま使用 |
+| H3_COST_MATRIX | FROM_H3, TO_H3 | R10 | SP 内で 3 ソースを UNION: ①RISK_SCORES R9→R10 (H3_CELL_TO_CHILDREN_STRING), ②BUILDING_ATTRIBUTES R11→R10 (H3_CELL_TO_PARENT), ③depot セル。887 セル, 加算式 TOTAL_COST |
+| ABSENCE_PATTERNS | H3_INDEX | R9 | SP_PREDICT_ABSENCE が DH.R9 をそのまま出力 |
+| BUILDING_ATTRIBUTES | H3_INDEX | R11 | 建物レベル。SP内で H3_CELL_TO_PARENT(R11,9)→R9 に集約して JOIN |
+| V_POI_AREA_PROFILE | H3_INDEX | R8 | エリアレベル。grid.R8 = H3_CELL_TO_PARENT(R9,8) で JOIN |
+| WEATHER_FORECAST | H3_INDEX | R7 | 広域天気 |
+| traffic_realtime (PG) | h3_index | R7 | 広域渋滞 |
+| road_construction (PG) | h3_index | R9 | 工事エリア |
+
+**設計原則**: R9 をDB保存ベース解像度とし、他の解像度は `H3_CELL_TO_PARENT` (粗く) / `H3_CELL_TO_CHILDREN` (細かく) で都度計算。
+
+**表示解像度**: R11 デフォルト (建物レベル)、R10 切替可能。APIが `resolution` パラメータで受け付ける。
+**計算解像度**: R10 (H3_COST_MATRIX と同じ。generate/next-trip の RISK_RES=10)。
+**コスト行列**: 887 セル × 886 対向 × 13 時間 × 7 日 ≈ 71.5M 行。TOTAL_COST = distance_km + risk*0.5 + weather*0.15 (加算式)。
+**渋滞表示**: R10 デフォルト (R7→R11は211K行で重いため)。
 
 ---
 
@@ -347,7 +371,7 @@ SELECT COUNT(*) FROM weather_forecast_iceberg WHERE datetime::date = CURRENT_DAT
 Notebook セル構成:
 1. データロード: delivery_history + weather + building_attributes を JOIN
 2. 特徴量:
-   - H3 Res8 セル (カテゴリ)
+   - H3 R9 セル → カテゴリエンコード (モデル内部では H3_R8 カラム名で参照)
    - 曜日 (0-6), 時間帯 (8-20)
    - 降水確率, 風速, 気温
    - 建物タイプ, EV有無, 宅配BOX有無
@@ -513,6 +537,12 @@ spec:
         requests:
           cpu: 0.5
           memory: 1Gi
+    - name: osrm
+      image: /lastmile_db/spcs/lastmile_repo/osrm-kanto:latest
+      resources:
+        requests:
+          cpu: 1
+          memory: 2Gi
   endpoints:
     - name: app
       port: 3000
@@ -530,7 +560,7 @@ spec:
 ページ構成:
 1. ML モデル精度モニタリング
 2. KPI トレンド (日次/週次/月次)
-3. 不在パターン可視化 (H3 Res8 ヒートマップ)
+3. 不在パターン可視化 (H3 R9 ヒートマップ, 表示時に解像度変換可)
 4. リスクスコア分布
 5. A/B テスト結果
 

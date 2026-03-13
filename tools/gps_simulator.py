@@ -390,7 +390,7 @@ def update_db(conn, drivers, date, enable_status, enable_dwell):
                 lat = EXCLUDED.lat, lng = EXCLUDED.lng, h3_index = EXCLUDED.h3_index,
                 speed = EXCLUDED.speed, heading = EXCLUDED.heading, timestamp = EXCLUDED.timestamp
             RETURNING h3_index::text
-        """, (d.driver_id, d.lat, d.lng, d.lat, d.lng, d.speed, d.heading, now))
+        """, (d.driver_id, d.lat, d.lng, d.lng, d.lat, d.speed, d.heading, now))
         row = cur.fetchone()
         if row:
             d.h3_cell = row[0]
@@ -398,7 +398,7 @@ def update_db(conn, drivers, date, enable_status, enable_dwell):
         cur.execute("""
             INSERT INTO driver_locations_history (driver_id, lat, lng, h3_index, speed, heading, recorded_at)
             VALUES (%s, %s, %s, h3_latlng_to_cell(POINT(%s, %s), 9), %s, %s, %s)
-        """, (d.driver_id, d.lat, d.lng, d.lat, d.lng, d.speed, d.heading, now))
+        """, (d.driver_id, d.lat, d.lng, d.lng, d.lat, d.speed, d.heading, now))
 
     for d in active_drivers:
         for evt in d.pending_events:
@@ -460,7 +460,7 @@ def reset_all(conn, date, driver_sims):
                h3_index = h3_latlng_to_cell(POINT(%s, %s), 9),
                speed = 0, heading = 0, timestamp = NOW()
                WHERE driver_id = %s""",
-            (d.lat, d.lng, d.lat, d.lng, d.driver_id))
+            (d.lat, d.lng, d.lng, d.lat, d.driver_id))
 
     for did in driver_ids:
         cur.execute(

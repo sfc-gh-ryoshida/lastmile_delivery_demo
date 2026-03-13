@@ -33,13 +33,17 @@ export async function POST(request: Request) {
     if (updatedCount > 0) {
       await pgQuery(
         `UPDATE packages p
-         SET loading_order = ds.stop_order
-         FROM delivery_status ds
-         WHERE ds.package_id = p.package_id
-           AND ds.date = $1
-           AND ds.driver_id = $2
-           AND ds.trip_number = $3
-           AND ds.status = 'loaded'`,
+         SET loading_order = sub.loading_order
+         FROM (
+           SELECT ds.package_id,
+                  (MAX(ds.stop_order) OVER() - ds.stop_order + 1)::int AS loading_order
+           FROM delivery_status ds
+           WHERE ds.date = $1
+             AND ds.driver_id = $2
+             AND ds.trip_number = $3
+             AND ds.status = 'loaded'
+         ) sub
+         WHERE p.package_id = sub.package_id`,
         [date, driver_id, trip_number]
       );
 

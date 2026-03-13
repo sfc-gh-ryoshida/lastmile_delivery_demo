@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { pgQuery } from "@/lib/postgres";
+import { latLngToCell } from "h3-js";
 
 interface DriverImpact {
   driver_id: string;
@@ -36,7 +37,7 @@ export async function GET(request: Request) {
       ring: number;
     }>(
       `WITH center AS (
-        SELECT h3_latlng_to_cell(point($1::double precision, $2::double precision), 9) AS cell
+        SELECT h3_latlng_to_cell(point($2::double precision, $1::double precision), 11) AS cell
       ),
       disk AS (
         SELECT h3_grid_disk((SELECT cell FROM center), $3) AS h3_cell
@@ -95,8 +96,7 @@ export async function GET(request: Request) {
       )
       SELECT i.child_cell::text AS child_h3, rc.restriction_type
       FROM impact i
-      JOIN road_construction rc ON rc.h3_index = i.child_cell
-        OR rc.h3_index = h3_cell_to_parent(i.child_cell, 7)
+      JOIN road_construction rc ON rc.h3_index = h3_cell_to_parent(i.child_cell, 9)
       WHERE rc.start_date <= $2
         AND (rc.end_date IS NULL OR rc.end_date >= $2)`,
       [cellH3List, today]
@@ -147,13 +147,16 @@ export async function GET(request: Request) {
       `WITH impact_zone AS (
         SELECT unnest($1::h3index[]) AS h3_cell
       ),
+      impact_r9 AS (
+        SELECT DISTINCT h3_cell_to_parent(h3_cell, 9) AS h3_r9 FROM impact_zone
+      ),
       pkg_stats AS (
         SELECT
           ds.driver_id,
           COUNT(*)::int AS total_packages,
           COUNT(*) FILTER (WHERE ds.status = 'delivered')::int AS delivered,
           COUNT(*) FILTER (WHERE ds.status != 'delivered')::int AS remaining,
-          COUNT(*) FILTER (WHERE p.h3_index::h3index IN (SELECT h3_cell FROM impact_zone))::int AS packages_in_zone
+          COUNT(*) FILTER (WHERE p.h3_index::h3index IN (SELECT h3_r9 FROM impact_r9))::int AS packages_in_zone
         FROM packages p
         JOIN delivery_status ds ON ds.package_id = p.package_id
         WHERE p.date = $2
@@ -175,7 +178,7 @@ export async function GET(request: Request) {
       WHERE d.is_active = true
         AND (
           COALESCE(ps.packages_in_zone, 0) > 0
-          OR dl.h3_index IN (SELECT h3_cell FROM impact_zone)
+          OR dl.h3_index IN (SELECT h3_r9 FROM impact_r9)
         )
       ORDER BY d.driver_id`,
       [cellH3List, today]
@@ -184,7 +187,11 @@ export async function GET(request: Request) {
     const cellWeightMap = new Map(enrichedCells.map((c) => [c.h3_index, c.impact_weight]));
 
     const affected: DriverImpact[] = driverDetails.map((raw) => {
-      const driverRing = ringMap.get(raw.driver_h3) ?? -1;
+      let driverH3R11 = "";
+      try {
+        driverH3R11 = latLngToCell(Number(raw.driver_lat), Number(raw.driver_lng), 11);
+      } catch { /* ignore */ }
+      const driverRing = ringMap.get(driverH3R11) ?? -1;
       const r = { ...raw, driver_ring: driverRing, packages_in_zone: Number(raw.packages_in_zone) };
       const driverInZone = r.driver_ring >= 0 && r.driver_ring <= k;
       const reasons: string[] = [];
@@ -200,11 +207,11 @@ export async function GET(request: Request) {
         action = "安否確認を最優先で実施。応答がない場合は現地確認を手配してください。残荷物は他ドライバーへ即時再割当てが必要です。";
       } else if (driverInZone && r.driver_ring === 1) {
         reasons.push("driver_adjacent");
-        detail = `現在位置が事故地点から${r.driver_ring}リング（約${(r.driver_ring * 174).toLocaleString()}m）。H3隣接セルにいるため通行規制の直接影響を受けます。`;
+        detail = `現在位置が事故地点から${r.driver_ring}リング（約${(r.driver_ring * 25).toLocaleString()}m）。H3隣接セルにいるため通行規制の直接影響を受けます。`;
         action = "迂回ルートを即時通知。影響エリア内の未配達荷物はルート再計算を実行してください。";
       } else if (driverInZone) {
         reasons.push("driver_nearby");
-        detail = `現在位置が事故地点から${r.driver_ring}リング（約${(r.driver_ring * 174).toLocaleString()}m）。`;
+        detail = `現在位置が事故地点から${r.driver_ring}リング（約${(r.driver_ring * 25).toLocaleString()}m）。`;
         if (isCongested) {
           detail += `当該セルは渋滞重要度が高く（重み ${driverCellWeight}）、遅延影響が拡大する見込みです。`;
           action = "渋滞が激しいエリアです。即座に迂回ルートを通知し、影響エリア外の配達を優先してください。";
@@ -259,10 +266,10 @@ export async function GET(request: Request) {
       };
     });
 
-    const h3Resolution = 9;
-    const hexEdgeKm = 0.174;
+    const h3Resolution = 11;
+    const hexEdgeKm = 0.025;
     const totalImpactCells = enrichedCells.length;
-    const impactAreaKm2 = +(totalImpactCells * 0.1053).toFixed(2);
+    const impactAreaKm2 = +(totalImpactCells * 0.0022).toFixed(4);
     const congestedCells = enrichedCells.filter((c) => c.congestion_level !== null && c.congestion_level >= 1).length;
     const constructionCells = enrichedCells.filter((c) => c.has_construction).length;
     const avgWeight = +(enrichedCells.reduce((s, c) => s + c.impact_weight, 0) / Math.max(enrichedCells.length, 1)).toFixed(2);

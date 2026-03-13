@@ -4,11 +4,19 @@ import { pgQuery } from "@/lib/postgres";
 interface RouteStop {
   driver_id: string;
   name: string;
+  trip_number: number;
   stop_order: number;
   lat: number;
   lng: number;
   status: string;
   completed_at: string | null;
+}
+
+interface RouteRow {
+  route_id: string;
+  driver_id: string;
+  trip_number: number;
+  route_geometry: [number, number][] | null;
 }
 
 export interface RouteData {
@@ -46,7 +54,10 @@ export async function GET(request: Request) {
       `SELECT
          ds.driver_id,
          d.name,
-         ROW_NUMBER() OVER(PARTITION BY ds.driver_id ORDER BY ds.completed_at NULLS LAST, p.package_id)::int AS stop_order,
+         COALESCE(ds.trip_number, 1) AS trip_number,
+         COALESCE(ds.stop_order,
+           ROW_NUMBER() OVER(PARTITION BY ds.driver_id ORDER BY ds.completed_at NULLS LAST, p.package_id)
+         )::int AS stop_order,
          p.lat,
          p.lng,
          ds.status,
@@ -55,9 +66,29 @@ export async function GET(request: Request) {
        JOIN drivers d ON d.driver_id = ds.driver_id
        JOIN packages p ON p.package_id = ds.package_id AND p.date = ds.date
        WHERE ds.date = $1
-       ORDER BY ds.driver_id, stop_order`,
+         AND ds.status IN ('assigned', 'loaded', 'in_transit', 'delivered')
+       ORDER BY ds.driver_id, COALESCE(ds.trip_number, 1), stop_order`,
       [date]
     );
+
+    const routeRows = await pgQuery<RouteRow>(
+      `SELECT route_id, driver_id,
+         CAST(SUBSTRING(route_id FROM 'T([0-9]+)$') AS int) AS trip_number,
+         route_geometry
+       FROM routes
+       WHERE date = $1 AND route_geometry IS NOT NULL`,
+      [date]
+    );
+    const geoMap = new Map<string, [number, number][]>();
+    for (const r of routeRows) {
+      const key = `${r.driver_id}-${r.trip_number}`;
+      const geo = typeof r.route_geometry === "string"
+        ? JSON.parse(r.route_geometry)
+        : r.route_geometry;
+      if (Array.isArray(geo) && geo.length > 0) {
+        geoMap.set(key, geo);
+      }
+    }
 
     const locRows = await pgQuery<{ driver_id: string; lat: number; lng: number }>(
       `SELECT dl.driver_id, dl.lat, dl.lng
@@ -80,32 +111,34 @@ export async function GET(request: Request) {
     for (const [driverId, { name, stops }] of grouped) {
       const loc = locMap.get(driverId);
 
-      const rounds: RouteStop[][] = [];
-      let currentRound: RouteStop[] = [];
-      let lastCompleted: Date | null = null;
-
+      const rounds = new Map<number, RouteStop[]>();
       for (const s of stops) {
-        const ts = s.completed_at ? new Date(s.completed_at) : null;
-        if (lastCompleted && ts && ts.getTime() - lastCompleted.getTime() > 60 * 60 * 1000) {
-          if (currentRound.length > 0) rounds.push(currentRound);
-          currentRound = [];
-        }
-        currentRound.push(s);
-        if (ts) lastCompleted = ts;
+        const trip = s.trip_number;
+        if (!rounds.has(trip)) rounds.set(trip, []);
+        rounds.get(trip)!.push(s);
       }
-      if (currentRound.length > 0) rounds.push(currentRound);
+      const roundEntries = [...rounds.entries()].sort((a, b) => a[0] - b[0]);
 
       const baseColor = DRIVER_COLORS[colorIdx % DRIVER_COLORS.length];
 
-      for (let ri = 0; ri < rounds.length; ri++) {
-        const roundStops = rounds[ri];
-        const path: [number, number][] = [];
-        if (loc && ri === 0) {
-          path.push([loc.lng, loc.lat]);
+      for (let ri = 0; ri < roundEntries.length; ri++) {
+        const [tripNum, roundStops] = roundEntries[ri];
+        const geoKey = `${driverId}-${tripNum}`;
+        const savedGeometry = geoMap.get(geoKey);
+
+        let path: [number, number][];
+        if (savedGeometry && savedGeometry.length >= 2) {
+          path = savedGeometry;
+        } else {
+          path = [];
+          if (loc && ri === 0) {
+            path.push([loc.lng, loc.lat]);
+          }
+          for (const s of roundStops) {
+            path.push([s.lng, s.lat]);
+          }
         }
-        for (const s of roundStops) {
-          path.push([s.lng, s.lat]);
-        }
+
         if (path.length >= 2) {
           const delivered = roundStops.filter((s) => s.status === "delivered").length;
           const completedTimes = roundStops
@@ -118,7 +151,7 @@ export async function GET(request: Request) {
             path,
             delivered,
             total: roundStops.length,
-            round: ri + 1,
+            round: tripNum,
             latest_completed_at: completedTimes.length > 0
               ? completedTimes[completedTimes.length - 1]
               : null,

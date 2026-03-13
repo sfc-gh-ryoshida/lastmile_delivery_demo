@@ -53,7 +53,7 @@ SELECT
     END,
     lat_val,
     lng_val,
-    h3_lat_lng_to_cell(POINT(lat_val, lng_val), 9),
+    h3_lat_lng_to_cell(POINT(lng_val, lat_val), 9),
     CASE
         WHEN RANDOM() < 0.08 THEN '09:00-12:00'
         WHEN RANDOM() < 0.15 THEN '14:00-16:00'
@@ -105,7 +105,7 @@ SELECT
     '東京都江東区',
     lat_val,
     lng_val,
-    h3_lat_lng_to_cell(POINT(lat_val, lng_val), 9),
+    h3_lat_lng_to_cell(POINT(lng_val, lat_val), 9),
     CASE
         WHEN RANDOM() < 0.08 THEN '09:00-12:00'
         WHEN RANDOM() < 0.15 THEN '14:00-16:00'
@@ -176,7 +176,7 @@ SELECT
     CURRENT_DATE,
     '東京都江東区',
     lat_val, lng_val,
-    h3_lat_lng_to_cell(POINT(lat_val, lng_val), 9),
+    h3_lat_lng_to_cell(POINT(lng_val, lat_val), 9),
     CASE
         WHEN RANDOM() < 0.08 THEN '09:00-12:00'
         WHEN RANDOM() < 0.15 THEN '14:00-16:00'
@@ -230,18 +230,18 @@ ON CONFLICT (package_id) DO NOTHING;
 -- ============================================================
 INSERT INTO driver_locations (driver_id, lat, lng, h3_index, speed, heading, timestamp)
 VALUES
-    ('DRV-001', 35.6548, 139.7932, h3_lat_lng_to_cell(POINT(35.6548, 139.7932), 9), 22.5, 135, NOW() - INTERVAL '30 seconds'),
-    ('DRV-002', 35.6512, 139.7865, h3_lat_lng_to_cell(POINT(35.6512, 139.7865), 9), 18.3, 200, NOW() - INTERVAL '15 seconds'),
-    ('DRV-003', 35.6385, 139.7920, h3_lat_lng_to_cell(POINT(35.6385, 139.7920), 9), 0.0,   0,  NOW() - INTERVAL '5 minutes'),
-    ('DRV-004', 35.6422, 139.7945, h3_lat_lng_to_cell(POINT(35.6422, 139.7945), 9), 30.1, 310, NOW() - INTERVAL '20 seconds'),
-    ('DRV-005', 35.6401, 139.8095, h3_lat_lng_to_cell(POINT(35.6401, 139.8095), 9), 15.7,  45, NOW() - INTERVAL '10 seconds'),
-    ('DRV-006', 35.6438, 139.8150, h3_lat_lng_to_cell(POINT(35.6438, 139.8150), 9), 25.2,  90, NOW() - INTERVAL '45 seconds'),
-    ('DRV-007', 35.6580, 139.7850, h3_lat_lng_to_cell(POINT(35.6580, 139.7850), 9), 12.0, 180, NOW() - INTERVAL '8 seconds'),
-    ('DRV-008', 35.6365, 139.7960, h3_lat_lng_to_cell(POINT(35.6365, 139.7960), 9), 28.4, 270, NOW() - INTERVAL '25 seconds'),
-    ('DRV-009', 35.6450, 139.8200, h3_lat_lng_to_cell(POINT(35.6450, 139.8200), 9), 20.0, 160, NOW() - INTERVAL '12 seconds'),
-    ('DRV-010', 35.6530, 139.7880, h3_lat_lng_to_cell(POINT(35.6530, 139.7880), 9), 0.0,   0,  NOW() - INTERVAL '2 minutes'),
-    ('DRV-011', 35.6390, 139.7980, h3_lat_lng_to_cell(POINT(35.6390, 139.7980), 9), 33.0,  20, NOW() - INTERVAL '18 seconds'),
-    ('DRV-012', 35.6475, 139.8120, h3_lat_lng_to_cell(POINT(35.6475, 139.8120), 9), 16.5, 225, NOW() - INTERVAL '35 seconds')
+    ('DRV-001', 35.6548, 139.7932, h3_lat_lng_to_cell(POINT(139.7932, 35.6548), 9), 22.5, 135, NOW() - INTERVAL '30 seconds'),
+    ('DRV-002', 35.6512, 139.7865, h3_lat_lng_to_cell(POINT(139.7865, 35.6512), 9), 18.3, 200, NOW() - INTERVAL '15 seconds'),
+    ('DRV-003', 35.6385, 139.7920, h3_lat_lng_to_cell(POINT(139.7920, 35.6385), 9), 0.0,   0,  NOW() - INTERVAL '5 minutes'),
+    ('DRV-004', 35.6422, 139.7945, h3_lat_lng_to_cell(POINT(139.7945, 35.6422), 9), 30.1, 310, NOW() - INTERVAL '20 seconds'),
+    ('DRV-005', 35.6401, 139.8095, h3_lat_lng_to_cell(POINT(139.8095, 35.6401), 9), 15.7,  45, NOW() - INTERVAL '10 seconds'),
+    ('DRV-006', 35.6438, 139.8150, h3_lat_lng_to_cell(POINT(139.8150, 35.6438), 9), 25.2,  90, NOW() - INTERVAL '45 seconds'),
+    ('DRV-007', 35.6580, 139.7850, h3_lat_lng_to_cell(POINT(139.7850, 35.6580), 9), 12.0, 180, NOW() - INTERVAL '8 seconds'),
+    ('DRV-008', 35.6365, 139.7960, h3_lat_lng_to_cell(POINT(139.7960, 35.6365), 9), 28.4, 270, NOW() - INTERVAL '25 seconds'),
+    ('DRV-009', 35.6450, 139.8200, h3_lat_lng_to_cell(POINT(139.8200, 35.6450), 9), 20.0, 160, NOW() - INTERVAL '12 seconds'),
+    ('DRV-010', 35.6530, 139.7880, h3_lat_lng_to_cell(POINT(139.7880, 35.6530), 9), 0.0,   0,  NOW() - INTERVAL '2 minutes'),
+    ('DRV-011', 35.6390, 139.7980, h3_lat_lng_to_cell(POINT(139.7980, 35.6390), 9), 33.0,  20, NOW() - INTERVAL '18 seconds'),
+    ('DRV-012', 35.6475, 139.8120, h3_lat_lng_to_cell(POINT(139.8120, 35.6475), 9), 16.5, 225, NOW() - INTERVAL '35 seconds')
 ON CONFLICT (driver_id) DO UPDATE SET
     lat = EXCLUDED.lat, lng = EXCLUDED.lng, h3_index = EXCLUDED.h3_index,
     speed = EXCLUDED.speed, heading = EXCLUDED.heading,
@@ -252,7 +252,7 @@ ON CONFLICT (driver_id) DO UPDATE SET
 -- ============================================================
 INSERT INTO traffic_realtime (h3_index, datetime, congestion_level, speed_ratio)
 SELECT
-    h3_lat_lng_to_cell(POINT(lat, lng), 7),
+    h3_lat_lng_to_cell(POINT(lng, lat), 7),
     generate_series(
         CURRENT_DATE + INTERVAL '8 hours',
         CURRENT_DATE + INTERVAL '18 hours',
@@ -283,7 +283,7 @@ ON CONFLICT (h3_index, datetime) DO NOTHING;
 INSERT INTO road_construction (h3_index, center_lat, center_lng, radius_m, start_date, end_date, restriction_type, description)
 VALUES
 (
-    h3_lat_lng_to_cell(POINT(35.6420, 139.8100), 9),
+    h3_lat_lng_to_cell(POINT(139.8100, 35.6420), 9),
     35.6420, 139.8100, 150,
     CURRENT_DATE + 1,
     CURRENT_DATE + 5,
@@ -291,7 +291,7 @@ VALUES
     '辰巳橋付近 車線規制（水道管工事）'
 ),
 (
-    h3_lat_lng_to_cell(POINT(35.6380, 139.8050), 9),
+    h3_lat_lng_to_cell(POINT(139.8050, 35.6380), 9),
     35.6380, 139.8050, 100,
     CURRENT_DATE + 1,
     CURRENT_DATE + 3,

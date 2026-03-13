@@ -74,7 +74,7 @@ function travelCost(
 }
 
 const COST_RES = 10;
-const RISK_RES = 11;
+const RISK_RES = 10;
 
 function toH3(lat: number, lng: number, res: number): string {
   try {
@@ -229,7 +229,7 @@ export async function POST(request: Request) {
     try {
       const currentHour = new Date().getHours();
       const riskRows = await sfQuery<{ H3_INDEX: string; RISK_SCORE: number }>(
-        `SELECT H3_INDEX, RISK_SCORE FROM ANALYTICS.RISK_SCORES WHERE DATE = ? AND HOUR = ?`,
+        `SELECT child.VALUE::STRING AS H3_INDEX, rs.RISK_SCORE FROM ANALYTICS.RISK_SCORES rs, LATERAL FLATTEN(INPUT => H3_CELL_TO_CHILDREN_STRING(rs.H3_INDEX, 10)) child WHERE rs.DATE = ? AND rs.HOUR = ?`,
         [date, currentHour >= 14 ? currentHour : 14]
       );
       const riskMap = new Map(riskRows.map((r) => [r.H3_INDEX, r.RISK_SCORE]));

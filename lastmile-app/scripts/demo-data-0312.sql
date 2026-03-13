@@ -248,7 +248,7 @@ WHERE d.is_active = true;
 
 -- Update h3_index for driver locations
 UPDATE driver_locations dl
-SET h3_index = h3_latlng_to_cell(point(dl.lat, dl.lng), 9)
+SET h3_index = h3_latlng_to_cell(point(dl.lng, dl.lat), 9)
 WHERE dl.h3_index IS NULL;
 
 -- 10. Generate driver_locations_history for 3/12
@@ -274,7 +274,7 @@ ORDER BY ds.driver_id, ds.completed_at;
 -- Also add depot departure points for each driver (08:00 JST = 23:00 UTC)
 INSERT INTO driver_locations_history (driver_id, lat, lng, h3_index, speed, heading, recorded_at)
 SELECT d.driver_id, 35.6495, 139.7914,
-  h3_latlng_to_cell(point(35.6495, 139.7914), 9),
+  h3_latlng_to_cell(point(139.7914, 35.6495), 9),
   0, 0,
   '2026-03-11 23:00:00+00'::timestamptz + (random() * 30) * interval '1 minute'
 FROM drivers d WHERE d.is_active;

@@ -3,6 +3,223 @@ import { pgQuery } from "@/lib/postgres";
 import { query as sfQuery } from "@/lib/snowflake";
 import { latLngToCell } from "h3-js";
 
+const OSRM_URL = process.env.OSRM_URL || "http://localhost:5000";
+
+interface OsrmMatrix {
+  distances: number[][];
+  durations: number[][];
+  coordIndex: Map<string, number>;
+}
+
+function coordKey(lat: number, lng: number): string {
+  return `${lat.toFixed(6)},${lng.toFixed(6)}`;
+}
+
+const OSRM_BATCH_SIZE = 100;
+
+async function fetchOsrmTableBatch(
+  coords: { lat: number; lng: number }[]
+): Promise<{ distances: number[][]; durations: number[][] } | null> {
+  const coordStr = coords.map((c) => `${c.lng},${c.lat}`).join(";");
+  const url = `${OSRM_URL}/table/v1/driving/${coordStr}?annotations=duration,distance&exclude=motorway`;
+  try {
+    const res = await fetch(url, { signal: AbortSignal.timeout(15000) });
+    if (!res.ok) {
+      console.warn(`OSRM table batch failed: HTTP ${res.status}`);
+      return null;
+    }
+    const json = await res.json();
+    if (json.code !== "Ok") {
+      console.warn(`OSRM table batch error: ${json.code} - ${json.message ?? ""}`);
+      return null;
+    }
+    return {
+      distances: json.distances.map((row: number[]) => row.map((d: number) => d / 1000)),
+      durations: json.durations.map((row: number[]) => row.map((d: number) => d / 60)),
+    };
+  } catch (e) {
+    console.warn("OSRM table batch error:", (e as Error).message);
+    return null;
+  }
+}
+
+async function fetchOsrmMatrix(
+  points: { lat: number; lng: number }[]
+): Promise<OsrmMatrix | null> {
+  if (points.length < 2) return null;
+  const unique = new Map<string, { lat: number; lng: number }>();
+  for (const p of points) {
+    const k = coordKey(p.lat, p.lng);
+    if (!unique.has(k)) unique.set(k, p);
+  }
+  const coords = [...unique.values()];
+  if (coords.length < 2) return null;
+
+  console.log(`OSRM: requesting matrix for ${coords.length} unique points (URL=${OSRM_URL})`);
+
+  if (coords.length <= OSRM_BATCH_SIZE) {
+    const result = await fetchOsrmTableBatch(coords);
+    if (!result) return null;
+    const idx = new Map<string, number>();
+    coords.forEach((c, i) => idx.set(coordKey(c.lat, c.lng), i));
+    return { ...result, coordIndex: idx };
+  }
+
+  const n = coords.length;
+  const distances: number[][] = Array.from({ length: n }, () => new Array(n).fill(Infinity));
+  const durations: number[][] = Array.from({ length: n }, () => new Array(n).fill(Infinity));
+  for (let i = 0; i < n; i++) {
+    distances[i][i] = 0;
+    durations[i][i] = 0;
+  }
+
+  let successCount = 0;
+  let failCount = 0;
+
+  for (let si = 0; si < n; si += OSRM_BATCH_SIZE) {
+    const srcEnd = Math.min(si + OSRM_BATCH_SIZE, n);
+    const srcSlice = coords.slice(si, srcEnd);
+
+    for (let di = 0; di < n; di += OSRM_BATCH_SIZE) {
+      const dstEnd = Math.min(di + OSRM_BATCH_SIZE, n);
+      const dstSlice = coords.slice(di, dstEnd);
+
+      const merged = [...srcSlice, ...dstSlice];
+      const dedup = new Map<string, number>();
+      const mergedUnique: { lat: number; lng: number }[] = [];
+      for (const c of merged) {
+        const k = coordKey(c.lat, c.lng);
+        if (!dedup.has(k)) {
+          dedup.set(k, mergedUnique.length);
+          mergedUnique.push(c);
+        }
+      }
+
+      const srcIndices = srcSlice.map((c) => dedup.get(coordKey(c.lat, c.lng))!);
+      const dstIndices = dstSlice.map((c) => dedup.get(coordKey(c.lat, c.lng))!);
+
+      const coordStr = mergedUnique.map((c) => `${c.lng},${c.lat}`).join(";");
+      const url = `${OSRM_URL}/table/v1/driving/${coordStr}?annotations=duration,distance&exclude=motorway&sources=${srcIndices.join(";")}&destinations=${dstIndices.join(";")}`;
+
+      try {
+        const res = await fetch(url, { signal: AbortSignal.timeout(15000) });
+        if (!res.ok) { failCount++; continue; }
+        const json = await res.json();
+        if (json.code !== "Ok") { failCount++; continue; }
+
+        for (let r = 0; r < srcSlice.length; r++) {
+          for (let c = 0; c < dstSlice.length; c++) {
+            const globalR = si + r;
+            const globalC = di + c;
+            const dRaw = json.distances[r][c];
+            const tRaw = json.durations[r][c];
+            if (dRaw != null && isFinite(dRaw)) distances[globalR][globalC] = dRaw / 1000;
+            if (tRaw != null && isFinite(tRaw)) durations[globalR][globalC] = tRaw / 60;
+          }
+        }
+        successCount++;
+      } catch {
+        failCount++;
+      }
+    }
+  }
+
+  if (successCount === 0) {
+    console.warn("OSRM: all batches failed");
+    return null;
+  }
+
+  console.log(`OSRM: matrix built from ${successCount} batches (${failCount} failed)`);
+  const idx = new Map<string, number>();
+  coords.forEach((c, i) => idx.set(coordKey(c.lat, c.lng), i));
+  return { distances, durations, coordIndex: idx };
+}
+
+function osrmDistKm(matrix: OsrmMatrix | null, fromLat: number, fromLng: number, toLat: number, toLng: number): number | null {
+  if (!matrix) return null;
+  const fi = matrix.coordIndex.get(coordKey(fromLat, fromLng));
+  const ti = matrix.coordIndex.get(coordKey(toLat, toLng));
+  if (fi === undefined || ti === undefined) return null;
+  const v = matrix.distances[fi][ti];
+  if (v === null || v === undefined || !isFinite(v)) return null;
+  return v;
+}
+
+function osrmDurationMin(matrix: OsrmMatrix | null, fromLat: number, fromLng: number, toLat: number, toLng: number): number | null {
+  if (!matrix) return null;
+  const fi = matrix.coordIndex.get(coordKey(fromLat, fromLng));
+  const ti = matrix.coordIndex.get(coordKey(toLat, toLng));
+  if (fi === undefined || ti === undefined) return null;
+  const v = matrix.durations[fi][ti];
+  if (v === null || v === undefined || !isFinite(v)) return null;
+  return v;
+}
+
+async function fetchOsrmRouteSegment(
+  points: { lat: number; lng: number }[]
+): Promise<{ lat: number; lng: number }[] | null> {
+  if (points.length < 2) return points;
+  const coordStr = points.map((c) => `${c.lng},${c.lat}`).join(";");
+  const url = `${OSRM_URL}/route/v1/driving/${coordStr}?overview=full&geometries=geojson&exclude=motorway`;
+  try {
+    const res = await fetch(url, { signal: AbortSignal.timeout(15000) });
+    if (!res.ok) {
+      const body = await res.text().catch(() => "");
+      console.warn(`OSRM route segment failed: HTTP ${res.status} (${points.length} pts) ${body.slice(0, 200)}`);
+      return null;
+    }
+    const json = await res.json();
+    if (json.code !== "Ok" || !json.routes?.[0]) {
+      console.warn(`OSRM route segment error: ${json.code} (${points.length} pts)`);
+      return null;
+    }
+    const coords: [number, number][] = json.routes[0].geometry.coordinates;
+    return coords.map(([lng, lat]: [number, number]) => ({ lat, lng }));
+  } catch (e) {
+    console.warn(`OSRM route segment exception: ${(e as Error).message} (${points.length} pts)`);
+    return null;
+  }
+}
+
+const ROUTE_SEGMENT_SIZE = 25;
+
+async function fetchOsrmRoute(
+  points: { lat: number; lng: number }[]
+): Promise<{ lat: number; lng: number }[]> {
+  if (points.length < 2) return points;
+
+  if (points.length <= ROUTE_SEGMENT_SIZE) {
+    const result = await fetchOsrmRouteSegment(points);
+    if (result) {
+      console.log(`OSRM route: ${points.length} waypoints → ${result.length} geometry points`);
+      return result;
+    }
+    return points;
+  }
+
+  const allCoords: { lat: number; lng: number }[] = [];
+  let failedSegments = 0;
+  for (let i = 0; i < points.length - 1; i += ROUTE_SEGMENT_SIZE - 1) {
+    const end = Math.min(i + ROUTE_SEGMENT_SIZE, points.length);
+    const segment = points.slice(i, end);
+    const result = await fetchOsrmRouteSegment(segment);
+    if (result) {
+      if (allCoords.length > 0) result.shift();
+      allCoords.push(...result);
+    } else {
+      failedSegments++;
+      const fallback = segment.slice(allCoords.length === 0 ? 0 : 1);
+      allCoords.push(...fallback);
+    }
+  }
+  if (allCoords.length > 0) {
+    console.log(`OSRM route: ${points.length} waypoints → ${allCoords.length} geometry points (segmented, ${failedSegments} segments fell back)`);
+    return allCoords;
+  }
+  console.warn(`OSRM route fallback to straight lines (${points.length} waypoints)`);
+  return points;
+}
+
 interface PackageRow {
   package_id: string;
   lat: number;
@@ -123,8 +340,11 @@ function travelCost(
   fromLng: number,
   toLat: number,
   toLng: number,
-  costMap: CostMap
+  costMap: CostMap,
+  osrm?: OsrmMatrix | null
 ): number {
+  const od = osrmDistKm(osrm ?? null, fromLat, fromLng, toLat, toLng);
+  if (od !== null) return od;
   if (fromH3R10 && toH3R10 && fromH3R10 !== toH3R10) {
     const c = costMap.get(costKey(fromH3R10, toH3R10));
     if (c !== undefined) return c;
@@ -133,7 +353,7 @@ function travelCost(
 }
 
 const COST_RES = 10;
-const RISK_RES = 11;
+const RISK_RES = 10;
 
 function toH3(lat: number, lng: number, res: number): string {
   try {
@@ -158,7 +378,8 @@ function minutesToTime(m: number): string {
   return `${String(h).padStart(2, "0")}:${String(mm).padStart(2, "0")}`;
 }
 
-function travelMinutes(distKm: number): number {
+function travelMinutes(distKm: number, osrmMin?: number | null): number {
+  if (osrmMin !== null && osrmMin !== undefined && isFinite(osrmMin)) return osrmMin;
   return (distKm / AVG_SPEED_KMH) * 60;
 }
 
@@ -167,6 +388,225 @@ function parseTimeWindow(tw: string | null): { start: number; end: number } | nu
   const match = tw.match(/^(\d{1,2}:\d{2})-(\d{1,2}:\d{2})$/);
   if (!match) return null;
   return { start: timeToMinutes(match[1]), end: timeToMinutes(match[2]) };
+}
+
+const CLUSTER_RES = 8;
+
+function toClusterCell(lat: number, lng: number): string {
+  try {
+    return latLngToCell(lat, lng, CLUSTER_RES);
+  } catch {
+    return "";
+  }
+}
+
+interface Cluster {
+  id: number;
+  cells: Set<string>;
+  packages: PackageRow[];
+  centroidLat: number;
+  centroidLng: number;
+  totalWeight: number;
+  totalVolume: number;
+}
+
+function clusterPackages(pkgs: PackageRow[]): Cluster[] {
+  const cellMap = new Map<string, PackageRow[]>();
+  for (const p of pkgs) {
+    const cell = toClusterCell(p.lat, p.lng);
+    if (!cell) continue;
+    if (!cellMap.has(cell)) cellMap.set(cell, []);
+    cellMap.get(cell)!.push(p);
+  }
+
+  const clusters: Cluster[] = [];
+  let nextId = 0;
+
+  for (const [, cellPkgs] of cellMap) {
+    const cluster: Cluster = {
+      id: nextId++,
+      cells: new Set(),
+      packages: cellPkgs,
+      centroidLat: cellPkgs.reduce((s, p) => s + p.lat, 0) / cellPkgs.length,
+      centroidLng: cellPkgs.reduce((s, p) => s + p.lng, 0) / cellPkgs.length,
+      totalWeight: cellPkgs.reduce((s, p) => s + p.weight, 0),
+      totalVolume: cellPkgs.reduce((s, p) => s + p.volume, 0),
+    };
+    clusters.push(cluster);
+  }
+
+  return clusters;
+}
+
+function splitLargeClusters(clusters: Cluster[], maxSize: number, maxWeight: number): Cluster[] {
+  const result: Cluster[] = [];
+  let nextId = clusters.length;
+  for (const c of clusters) {
+    if (c.packages.length <= maxSize && c.totalWeight <= maxWeight) {
+      result.push(c);
+      continue;
+    }
+    const sorted = [...c.packages].sort((a, b) => a.lat - b.lat || a.lng - b.lng);
+    let chunk: PackageRow[] = [];
+    let chunkWeight = 0;
+    for (const p of sorted) {
+      if (chunk.length >= maxSize || (chunkWeight + p.weight > maxWeight && chunk.length > 0)) {
+        const sub: Cluster = {
+          id: nextId++,
+          cells: new Set(),
+          packages: chunk,
+          centroidLat: chunk.reduce((s, x) => s + x.lat, 0) / chunk.length,
+          centroidLng: chunk.reduce((s, x) => s + x.lng, 0) / chunk.length,
+          totalWeight: chunkWeight,
+          totalVolume: chunk.reduce((s, x) => s + x.volume, 0),
+        };
+        result.push(sub);
+        chunk = [];
+        chunkWeight = 0;
+      }
+      chunk.push(p);
+      chunkWeight += p.weight;
+    }
+    if (chunk.length > 0) {
+      const sub: Cluster = {
+        id: nextId++,
+        cells: new Set(),
+        packages: chunk,
+        centroidLat: chunk.reduce((s, x) => s + x.lat, 0) / chunk.length,
+        centroidLng: chunk.reduce((s, x) => s + x.lng, 0) / chunk.length,
+        totalWeight: chunkWeight,
+        totalVolume: chunk.reduce((s, x) => s + x.volume, 0),
+      };
+      result.push(sub);
+    }
+  }
+  return result;
+}
+
+function assignClustersByArea(
+  timePools: PackageRow[][],
+  sortedDrivers: DriverRow[],
+  maxTripsGlobal: number
+): Map<string, { weight: number; volume: number; packages: PackageRow[] }[]> {
+  const driverTrips = new Map<string, { weight: number; volume: number; packages: PackageRow[] }[]>();
+  for (const d of sortedDrivers) {
+    const trips: { weight: number; volume: number; packages: PackageRow[] }[] = [];
+    for (let t = 0; t < d.max_trips; t++) {
+      trips.push({ weight: 0, volume: 0, packages: [] });
+    }
+    driverTrips.set(d.driver_id, trips);
+  }
+
+  const minCap = Math.min(...sortedDrivers.map((d) => d.vehicle_capacity));
+  const avgTrips = sortedDrivers.reduce((s, d) => s + d.max_trips, 0) / sortedDrivers.length;
+  const totalPkgs = timePools.flat().length;
+  const targetPerTrip = Math.min(MAX_PACKAGES_PER_TRIP, Math.ceil(totalPkgs / (sortedDrivers.length * avgTrips) * 1.3));
+  const targetWeight = minCap / avgTrips * 0.85;
+
+  function tryAssignCluster(cluster: Cluster, preferTrip: number): boolean {
+    let bestDriver: DriverRow | null = null;
+    let bestTrip = preferTrip;
+    let bestScore = Infinity;
+
+    const tryTrips = [preferTrip];
+    for (let t = 0; t < maxTripsGlobal; t++) {
+      if (t !== preferTrip) tryTrips.push(t);
+    }
+
+    for (const d of sortedDrivers) {
+      const trips = driverTrips.get(d.driver_id)!;
+      for (const ti of tryTrips) {
+        if (ti >= trips.length) continue;
+        const load = trips[ti];
+        if (load.weight + cluster.totalWeight > d.vehicle_capacity) continue;
+        if (load.volume + cluster.totalVolume > d.vehicle_volume) continue;
+        if (load.packages.length + cluster.packages.length > targetPerTrip) continue;
+
+        let areaAffinity = haversine(cluster.centroidLat, cluster.centroidLng, d.depot_lat, d.depot_lng);
+        if (load.packages.length > 0) {
+          const avgLat = load.packages.reduce((s, p) => s + p.lat, 0) / load.packages.length;
+          const avgLng = load.packages.reduce((s, p) => s + p.lng, 0) / load.packages.length;
+          areaAffinity = haversine(cluster.centroidLat, cluster.centroidLng, avgLat, avgLng);
+        }
+
+        const tripPenalty = ti !== preferTrip ? 2 : 0;
+        const totalPkgs = trips.reduce((s, t) => s + t.packages.length, 0);
+        const score = areaAffinity * 5 + totalPkgs * 0.1 + tripPenalty;
+        if (score < bestScore) {
+          bestScore = score;
+          bestDriver = d;
+          bestTrip = ti;
+        }
+      }
+    }
+
+    if (bestDriver) {
+      const load = driverTrips.get(bestDriver.driver_id)![bestTrip];
+      for (const p of cluster.packages) {
+        load.weight += p.weight;
+        load.volume += p.volume;
+        load.packages.push(p);
+      }
+      return true;
+    }
+    return false;
+  }
+
+  function tryAssignSingle(p: PackageRow, preferTrip: number): boolean {
+    const tryTrips = [preferTrip];
+    for (let t = 0; t < maxTripsGlobal; t++) {
+      if (t !== preferTrip) tryTrips.push(t);
+    }
+
+    for (const ti of tryTrips) {
+      let bestD: DriverRow | null = null;
+      let bestS = Infinity;
+      for (const d of sortedDrivers) {
+        const trips = driverTrips.get(d.driver_id)!;
+        if (ti >= trips.length) continue;
+        const load = trips[ti];
+        if (load.weight + p.weight > d.vehicle_capacity) continue;
+        if (load.volume + p.volume > d.vehicle_volume) continue;
+        if (load.packages.length >= targetPerTrip) continue;
+        const totalPkgs = trips.reduce((s, t) => s + t.packages.length, 0);
+        let affinity = haversine(p.lat, p.lng, d.depot_lat, d.depot_lng);
+        if (load.packages.length > 0) {
+          const aLat = load.packages.reduce((s, x) => s + x.lat, 0) / load.packages.length;
+          const aLng = load.packages.reduce((s, x) => s + x.lng, 0) / load.packages.length;
+          affinity = haversine(p.lat, p.lng, aLat, aLng);
+        }
+        const sc = affinity * 3 + totalPkgs * 0.1;
+        if (sc < bestS) { bestS = sc; bestD = d; }
+      }
+      if (bestD) {
+        const load = driverTrips.get(bestD.driver_id)![ti];
+        load.weight += p.weight;
+        load.volume += p.volume;
+        load.packages.push(p);
+        return true;
+      }
+    }
+    return false;
+  }
+
+  for (let poolIdx = 0; poolIdx < timePools.length; poolIdx++) {
+    const pool = timePools[poolIdx];
+    if (pool.length === 0) continue;
+
+    const rawClusters = clusterPackages(pool);
+    const clusters = splitLargeClusters(rawClusters, targetPerTrip, targetWeight);
+    clusters.sort((a, b) => b.packages.length - a.packages.length);
+
+    for (const cluster of clusters) {
+      if (!tryAssignCluster(cluster, poolIdx)) {
+        for (const p of cluster.packages) {
+          tryAssignSingle(p, poolIdx);
+        }
+      }
+    }
+  }
+
+  return driverTrips;
 }
 
 function greedySortWithETA(
@@ -178,7 +618,8 @@ function greedySortWithETA(
   costMap: CostMap,
   depotLat: number,
   depotLng: number,
-  depotH3: string
+  depotH3: string,
+  osrm?: OsrmMatrix | null
 ): { ordered: (PackageRow & { eta: number })[]; returnMinutes: number } {
   if (pkgs.length === 0) return { ordered: [], returnMinutes: startMinutes };
 
@@ -196,8 +637,9 @@ function greedySortWithETA(
     for (let i = 0; i < remaining.length; i++) {
       const p = remaining[i];
       const destH3 = toR10(p.lat, p.lng);
-      const dist = travelCost(curH3, destH3, curLat, curLng, p.lat, p.lng, costMap);
-      const travel = travelMinutes(dist);
+      const dist = travelCost(curH3, destH3, curLat, curLng, p.lat, p.lng, costMap, osrm);
+      const oMin = osrmDurationMin(osrm ?? null, curLat, curLng, p.lat, p.lng);
+      const travel = travelMinutes(dist, oMin);
       const arriveAt = curTime + travel;
 
       const tw = parseTimeWindow(p.time_window);
@@ -220,8 +662,9 @@ function greedySortWithETA(
 
     const next = remaining.splice(bestIdx, 1)[0];
     const destH3 = toR10(next.lat, next.lng);
-    const dist = travelCost(curH3, destH3, curLat, curLng, next.lat, next.lng, costMap);
-    const travel = travelMinutes(dist);
+    const dist = travelCost(curH3, destH3, curLat, curLng, next.lat, next.lng, costMap, osrm);
+    const oMin = osrmDurationMin(osrm ?? null, curLat, curLng, next.lat, next.lng);
+    const travel = travelMinutes(dist, oMin);
     const arriveAt = curTime + travel;
 
     const tw = parseTimeWindow(next.time_window);
@@ -237,11 +680,92 @@ function greedySortWithETA(
 
   const lastPkg = ordered[ordered.length - 1];
   const returnDist = travelCost(
-    toR10(lastPkg.lat, lastPkg.lng), depotH3, lastPkg.lat, lastPkg.lng, depotLat, depotLng, costMap
+    toR10(lastPkg.lat, lastPkg.lng), depotH3, lastPkg.lat, lastPkg.lng, depotLat, depotLng, costMap, osrm
   );
-  const returnMinutes = curTime + travelMinutes(returnDist);
+  const retOMin = osrmDurationMin(osrm ?? null, lastPkg.lat, lastPkg.lng, depotLat, depotLng);
+  const returnMinutes = curTime + travelMinutes(returnDist, retOMin);
 
   return { ordered, returnMinutes };
+}
+
+function twoOptImprove(
+  ordered: (PackageRow & { eta: number })[],
+  startLat: number,
+  startLng: number,
+  startH3: string,
+  startMinutes: number,
+  costMap: CostMap,
+  depotLat: number,
+  depotLng: number,
+  depotH3: string,
+  osrm?: OsrmMatrix | null
+): (PackageRow & { eta: number })[] {
+  if (ordered.length < 4) return ordered;
+
+  const route = [...ordered];
+  const n = route.length;
+  let improved = true;
+  let iterations = 0;
+  const MAX_ITER = 10;
+
+  while (improved && iterations < MAX_ITER) {
+    improved = false;
+    iterations++;
+    for (let i = 0; i < n - 1; i++) {
+      for (let j = i + 2; j < n; j++) {
+        const aLat = i === 0 ? startLat : route[i - 1].lat;
+        const aLng = i === 0 ? startLng : route[i - 1].lng;
+        const aH3 = i === 0 ? startH3 : toR10(route[i - 1].lat, route[i - 1].lng);
+
+        const bLat = j + 1 < n ? route[j + 1].lat : depotLat;
+        const bLng = j + 1 < n ? route[j + 1].lng : depotLng;
+        const bH3 = j + 1 < n ? toR10(route[j + 1].lat, route[j + 1].lng) : depotH3;
+
+        const iH3 = toR10(route[i].lat, route[i].lng);
+        const jH3 = toR10(route[j].lat, route[j].lng);
+        const i1H3 = i + 1 < n ? toR10(route[i + 1].lat, route[i + 1].lng) : depotH3;
+
+        const dBefore =
+          travelCost(aH3, iH3, aLat, aLng, route[i].lat, route[i].lng, costMap, osrm) +
+          travelCost(jH3, bH3, route[j].lat, route[j].lng, bLat, bLng, costMap, osrm);
+        const dAfter =
+          travelCost(aH3, jH3, aLat, aLng, route[j].lat, route[j].lng, costMap, osrm) +
+          travelCost(iH3, bH3, route[i].lat, route[i].lng, bLat, bLng, costMap, osrm);
+
+        if (dAfter < dBefore - 0.001) {
+          const segment = route.slice(i, j + 1).reverse();
+          for (let k = 0; k < segment.length; k++) {
+            route[i + k] = segment[k];
+          }
+          improved = true;
+        }
+      }
+    }
+  }
+
+  let curLat = startLat;
+  let curLng = startLng;
+  let curH3 = startH3;
+  let curTime = startMinutes;
+
+  for (const p of route) {
+    const destH3 = toR10(p.lat, p.lng);
+    const dist = travelCost(curH3, destH3, curLat, curLng, p.lat, p.lng, costMap, osrm);
+    const oMin = osrmDurationMin(osrm ?? null, curLat, curLng, p.lat, p.lng);
+    const travel = travelMinutes(dist, oMin);
+    const arriveAt = curTime + travel;
+
+    const tw = parseTimeWindow(p.time_window);
+    p.eta = tw && arriveAt < tw.start ? tw.start : arriveAt;
+
+    const dwell = p.delivery_method === "drop_off" ? DWELL_DROP_OFF : DWELL_FACE_TO_FACE;
+    curTime = p.eta + dwell;
+    curLat = p.lat;
+    curLng = p.lng;
+    curH3 = destH3;
+  }
+
+  return route;
 }
 
 function scoreTripQuality(
@@ -463,7 +987,7 @@ export async function POST(request: Request) {
 
     try {
       const riskRows = await sfQuery<{ H3_INDEX: string; RISK_SCORE: number }>(
-        `SELECT H3_INDEX, RISK_SCORE FROM ANALYTICS.RISK_SCORES WHERE DATE = ? AND HOUR = 10`,
+        `SELECT child.VALUE::STRING AS H3_INDEX, rs.RISK_SCORE FROM ANALYTICS.RISK_SCORES rs, LATERAL FLATTEN(INPUT => H3_CELL_TO_CHILDREN_STRING(rs.H3_INDEX, 10)) child WHERE rs.DATE = ? AND rs.HOUR = 10`,
         [date]
       );
       const riskMap = new Map(riskRows.map((r) => [r.H3_INDEX, r.RISK_SCORE]));
@@ -477,7 +1001,7 @@ export async function POST(request: Request) {
     try {
       const dow = new Date(date).getDay();
       const absRows = await sfQuery<{ H3_INDEX: string; ABSENCE_RATE: number }>(
-        `SELECT H3_INDEX, ABSENCE_RATE FROM ANALYTICS.ABSENCE_PATTERNS WHERE DAY_OF_WEEK = ? AND HOUR = 10`,
+        `SELECT child.VALUE::STRING AS H3_INDEX, rs.ABSENCE_RATE FROM ANALYTICS.ABSENCE_PATTERNS rs, LATERAL FLATTEN(INPUT => H3_CELL_TO_CHILDREN_STRING(rs.H3_INDEX, 10)) child WHERE rs.DAY_OF_WEEK = ? AND rs.HOUR = 10`,
         [dow]
       );
       const absMap = new Map(absRows.map((r) => [r.H3_INDEX, r.ABSENCE_RATE]));
@@ -517,7 +1041,18 @@ export async function POST(request: Request) {
       console.warn("H3 cost matrix unavailable, falling back to haversine:", (e as Error).message);
     }
 
+    const osrmPoints = [
+      { lat: depotLat, lng: depotLng },
+      ...packages.map((p) => ({ lat: p.lat, lng: p.lng })),
+      ...drivers.map((d) => ({ lat: d.depot_lat, lng: d.depot_lng })),
+    ];
+    const osrmMatrix = await fetchOsrmMatrix(osrmPoints);
+    if (osrmMatrix) {
+      console.log(`OSRM matrix loaded: ${osrmMatrix.coordIndex.size} unique points`);
+    }
+
     const driverAssignments: DriverAssignment[] = [];
+
     let morningPkgs: PackageRow[] = [];
     let afternoonPkgs: PackageRow[] = [];
     let eveningPkgs: PackageRow[] = [];
@@ -535,12 +1070,6 @@ export async function POST(request: Request) {
         } else {
           flexPkgs.push(pkg);
         }
-      }
-
-      interface TripLoad {
-        weight: number;
-        volume: number;
-        packages: PackageRow[];
       }
 
       const maxTripsGlobal = Math.max(...sortedDrivers.map((d) => d.max_trips), 2);
@@ -567,58 +1096,7 @@ export async function POST(request: Request) {
         }
       }
 
-      const driverTrips = new Map<string, TripLoad[]>();
-      for (const d of sortedDrivers) {
-        const trips: TripLoad[] = [];
-        for (let t = 0; t < d.max_trips; t++) {
-          trips.push({ weight: 0, volume: 0, packages: [] });
-        }
-        driverTrips.set(d.driver_id, trips);
-      }
-
-      function assignToTrip(pkg: PackageRow, tripIdx: number): boolean {
-        let bestDriver: DriverRow | null = null;
-        let bestScore = Infinity;
-
-        for (const d of sortedDrivers) {
-          const trips = driverTrips.get(d.driver_id)!;
-          if (tripIdx >= trips.length) continue;
-          const load = trips[tripIdx];
-          if (load.weight + pkg.weight > d.vehicle_capacity) continue;
-          if (load.volume + pkg.volume > d.vehicle_volume) continue;
-          if (load.packages.length >= MAX_PACKAGES_PER_TRIP) continue;
-
-          const tripPkgs = load.packages.length;
-          const totalPkgs = trips.reduce((s, t) => s + t.packages.length, 0);
-          const score = tripPkgs * 2 + totalPkgs;
-          if (score < bestScore) {
-            bestScore = score;
-            bestDriver = d;
-          }
-        }
-
-        if (bestDriver) {
-          const load = driverTrips.get(bestDriver.driver_id)![tripIdx];
-          load.weight += pkg.weight;
-          load.volume += pkg.volume;
-          load.packages.push(pkg);
-          return true;
-        }
-        return false;
-      }
-
-      const riskSorted = (pool: PackageRow[]) =>
-        [...pool].sort((a, b) => (a.risk_score ?? 0) - (b.risk_score ?? 0));
-
-      for (let poolIdx = 0; poolIdx < timePools.length; poolIdx++) {
-        for (const pkg of riskSorted(timePools[poolIdx])) {
-          if (!assignToTrip(pkg, poolIdx)) {
-            for (let alt = 0; alt < maxTripsGlobal; alt++) {
-              if (alt !== poolIdx && assignToTrip(pkg, alt)) break;
-            }
-          }
-        }
-      }
+      const driverTrips = assignClustersByArea(timePools, sortedDrivers, maxTripsGlobal);
 
       for (const d of sortedDrivers) {
         const trips = driverTrips.get(d.driver_id)!;
@@ -634,7 +1112,7 @@ export async function POST(request: Request) {
         let totalVol = 0;
         let currentTime = shiftStartMin;
 
-        const tripEntries: { idx: number; load: TripLoad }[] = [];
+        const tripEntries: { idx: number; load: { weight: number; volume: number; packages: PackageRow[] } }[] = [];
         for (let ti = 0; ti < trips.length; ti++) {
           if (trips[ti].packages.length > 0) tripEntries.push({ idx: ti, load: trips[ti] });
         }
@@ -644,7 +1122,7 @@ export async function POST(request: Request) {
           const tripNum = tripEntries[ti].idx + 1;
           const departureTime = currentTime;
 
-          const { ordered, returnMinutes } = greedySortWithETA(
+          const greedy = greedySortWithETA(
             load.packages,
             dDepotLat,
             dDepotLng,
@@ -653,17 +1131,38 @@ export async function POST(request: Request) {
             costMap,
             dDepotLat,
             dDepotLng,
-            dDepotH3
+            dDepotH3,
+            osrmMatrix
           );
+          const ordered = twoOptImprove(
+            greedy.ordered,
+            dDepotLat,
+            dDepotLng,
+            dDepotH3,
+            departureTime,
+            costMap,
+            dDepotLat,
+            dDepotLng,
+            dDepotH3,
+            osrmMatrix
+          );
+          let returnMinutes = greedy.returnMinutes;
+          if (ordered.length > 0) {
+            const last2opt = ordered[ordered.length - 1];
+            const dwell2opt = last2opt.delivery_method === "drop_off" ? DWELL_DROP_OFF : DWELL_FACE_TO_FACE;
+            const retDist = travelCost(toR10(last2opt.lat, last2opt.lng), dDepotH3, last2opt.lat, last2opt.lng, dDepotLat, dDepotLng, costMap, osrmMatrix);
+            const retOMin = osrmDurationMin(osrmMatrix, last2opt.lat, last2opt.lng, dDepotLat, dDepotLng);
+            returnMinutes = last2opt.eta + dwell2opt + travelMinutes(retDist, retOMin);
+          }
 
           if (returnMinutes > shiftEndMin) {
             let trimCount = 0;
             while (ordered.length > 0) {
               const last = ordered[ordered.length - 1];
               const lastDwell = last.delivery_method === "drop_off" ? DWELL_DROP_OFF : DWELL_FACE_TO_FACE;
-              if (last.eta + lastDwell + travelMinutes(
-                haversine(last.lat, last.lng, dDepotLat, dDepotLng)
-              ) <= shiftEndMin) break;
+              const trimDist = travelCost(toR10(last.lat, last.lng), dDepotH3, last.lat, last.lng, dDepotLat, dDepotLng, costMap, osrmMatrix);
+              const trimOMin = osrmDurationMin(osrmMatrix, last.lat, last.lng, dDepotLat, dDepotLng);
+              if (last.eta + lastDwell + travelMinutes(trimDist, trimOMin) <= shiftEndMin) break;
               ordered.pop();
               trimCount++;
             }
@@ -676,15 +1175,18 @@ export async function POST(request: Request) {
 
           const lastStop = ordered[ordered.length - 1];
           const lastStopDwell = lastStop.delivery_method === "drop_off" ? DWELL_DROP_OFF : DWELL_FACE_TO_FACE;
-          const actualReturn = lastStop.eta + lastStopDwell + travelMinutes(
-            haversine(lastStop.lat, lastStop.lng, dDepotLat, dDepotLng)
-          );
+          const retDist2 = travelCost(toR10(lastStop.lat, lastStop.lng), dDepotH3, lastStop.lat, lastStop.lng, dDepotLat, dDepotLng, costMap, osrmMatrix);
+          const retOMin2 = osrmDurationMin(osrmMatrix, lastStop.lat, lastStop.lng, dDepotLat, dDepotLng);
+          const actualReturn = lastStop.eta + lastStopDwell + travelMinutes(retDist2, retOMin2);
 
-          const tripRoute = [
+          const waypointsForRoute = [
             { lat: dDepotLat, lng: dDepotLng },
             ...ordered.map((p) => ({ lat: p.lat, lng: p.lng })),
             { lat: dDepotLat, lng: dDepotLng },
           ];
+          const tripRoute = osrmMatrix
+            ? await fetchOsrmRoute(waypointsForRoute)
+            : waypointsForRoute;
 
           const tripQuality = scoreTripQuality(ordered, departureTime, actualReturn, shiftEndMin, load, d);
 
@@ -767,10 +1269,11 @@ export async function POST(request: Request) {
     const reviewNeeded = driverAssignments.filter((a) => a.needs_review).length;
 
     if (confirm && driverAssignments.length > 0) {
-      await pgQuery(
-        `DELETE FROM routes WHERE date = $1`,
-        [date]
-      );
+      await pgQuery(`DELETE FROM routes WHERE date = $1`, [date]);
+
+      const routeValues: unknown[][] = [];
+      const dsUpdates: { driver_id: string; trip: number; stop_order: number; package_id: string }[] = [];
+      const pkgUpdates: { route_id: string; stop_order: number; package_id: string }[] = [];
 
       for (const da of driverAssignments) {
         for (const trip of da.trips) {
@@ -780,29 +1283,54 @@ export async function POST(request: Request) {
             return sum + haversine(arr[i - 1].lat, arr[i - 1].lng, pt.lat, pt.lng);
           }, 0);
           const timeEst = Math.round((trip.return_time ? timeToMinutes(trip.return_time) : 0) - (trip.departure_time ? timeToMinutes(trip.departure_time) : 0));
-
-          await pgQuery(
-            `INSERT INTO routes (route_id, driver_id, depot_id, date, total_distance, total_time_est, stop_count, status)
-             VALUES ($1, $2, (SELECT depot_id FROM drivers WHERE driver_id = $2), $3, $4, $5, $6, 'planned')`,
-            [routeId, da.driver_id, date, Math.round(totalDist * 100) / 100, timeEst, trip.total_packages]
-          );
+          routeValues.push([routeId, da.driver_id, date, Math.round(totalDist * 100) / 100, timeEst, trip.total_packages]);
 
           for (const pkg of trip.packages) {
-            await pgQuery(
-              `UPDATE delivery_status
-               SET driver_id = $1, trip_number = $2, stop_order = $3, status = 'assigned', updated_at = NOW()
-               WHERE package_id = $4 AND date = $5`,
-              [da.driver_id, trip.trip, pkg.stop_order, pkg.package_id, date]
-            );
-
-            await pgQuery(
-              `UPDATE packages
-               SET route_id = $1, stop_order = $2
-               WHERE package_id = $3`,
-              [routeId, pkg.stop_order, pkg.package_id]
-            );
+            dsUpdates.push({ driver_id: da.driver_id, trip: trip.trip, stop_order: pkg.stop_order, package_id: pkg.package_id });
+            pkgUpdates.push({ route_id: routeId, stop_order: pkg.stop_order, package_id: pkg.package_id });
           }
         }
+      }
+
+      if (routeValues.length > 0) {
+        const rPlaceholders = routeValues.map((_, i) => {
+          const b = i * 6;
+          return `($${b+1}, $${b+2}, (SELECT depot_id FROM drivers WHERE driver_id = $${b+2}), $${b+3}, $${b+4}, $${b+5}, $${b+6}, 'planned')`;
+        }).join(",\n");
+        await pgQuery(
+          `INSERT INTO routes (route_id, driver_id, depot_id, date, total_distance, total_time_est, stop_count, status) VALUES ${rPlaceholders}`,
+          routeValues.flat()
+        );
+      }
+
+      const DS_BATCH = 200;
+      for (let i = 0; i < dsUpdates.length; i += DS_BATCH) {
+        const batch = dsUpdates.slice(i, i + DS_BATCH);
+        const vals = batch.map((_, j) => {
+          const b = j * 5;
+          return `($${b+1}, $${b+2}::int, $${b+3}::int, $${b+4}, $${b+5}::date)`;
+        }).join(", ");
+        await pgQuery(
+          `UPDATE delivery_status ds SET
+             driver_id = v.driver_id, trip_number = v.trip, stop_order = v.stop_order, status = 'assigned', updated_at = NOW()
+           FROM (VALUES ${vals}) AS v(driver_id, trip, stop_order, package_id, date)
+           WHERE ds.package_id = v.package_id AND ds.date = v.date`,
+          batch.flatMap((u) => [u.driver_id, u.trip, u.stop_order, u.package_id, date])
+        );
+      }
+
+      for (let i = 0; i < pkgUpdates.length; i += DS_BATCH) {
+        const batch = pkgUpdates.slice(i, i + DS_BATCH);
+        const vals = batch.map((_, j) => {
+          const b = j * 3;
+          return `($${b+1}, $${b+2}::int, $${b+3})`;
+        }).join(", ");
+        await pgQuery(
+          `UPDATE packages p SET route_id = v.route_id, stop_order = v.stop_order
+           FROM (VALUES ${vals}) AS v(route_id, stop_order, package_id)
+           WHERE p.package_id = v.package_id`,
+          batch.flatMap((u) => [u.route_id, u.stop_order, u.package_id])
+        );
       }
     }
 
@@ -816,6 +1344,8 @@ export async function POST(request: Request) {
       confirmed: confirm,
       assignments: driverAssignments,
       optimization_summary: {
+        osrm_enabled: osrmMatrix !== null,
+        osrm_points: osrmMatrix?.coordIndex.size ?? 0,
         cost_matrix_pairs: costMap.size,
         risk_applied_count: riskApplied,
         absence_applied_count: absenceApplied,

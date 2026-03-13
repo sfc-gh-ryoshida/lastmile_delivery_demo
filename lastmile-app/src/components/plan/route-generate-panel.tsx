@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useCallback } from "react";
+import { useState, useCallback, useEffect } from "react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -197,6 +197,24 @@ export function RouteGeneratePanel({
   } | null>(null);
   const [showConfirmDialog, setShowConfirmDialog] = useState(false);
   const [selectedDriverIds, setSelectedDriverIds] = useState<Set<string>>(new Set());
+  const [showLoadingOrder, setShowLoadingOrder] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await fetch(`/api/plan/routes/confirmed?date=${date}`);
+        if (!res.ok || cancelled) return;
+        const data = await res.json();
+        if (cancelled || !data.confirmed || !data.assignments?.length) return;
+        setResult(data as GenerateResult);
+        setPhase("confirmed");
+        onGenerated?.(data);
+        onConfirmed?.(data);
+      } catch { /* ignore */ }
+    })();
+    return () => { cancelled = true; };
+  }, [date]);
 
   const requestGenerate = () => {
     setShowConfirmDialog(true);
@@ -243,10 +261,16 @@ export function RouteGeneratePanel({
           }))
         )
       );
+      const route_geometries = result.assignments.flatMap((a) =>
+        a.trips.map((t) => ({
+          route_id: `R-${a.driver_id}-${date}-T${t.trip}`,
+          geometry: t.route.map((pt) => [pt.lng, pt.lat] as [number, number]),
+        }))
+      );
       const res = await fetch("/api/plan/routes/assign", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ date, moves }),
+        body: JSON.stringify({ date, moves, route_geometries }),
       });
       if (res.ok) {
         setPhase("confirmed");
@@ -464,7 +488,7 @@ export function RouteGeneratePanel({
                         {summary.risk_applied_count}件
                         {summary.avg_risk_score != null && (
                           <span className={`ml-1 ${riskColor(summary.avg_risk_score)}`}>
-                            (平均{(summary.avg_risk_score * 100).toFixed(0)}%)
+                            (平均{(Number(summary.avg_risk_score) * 100).toFixed(0)}%)
                           </span>
                         )}
                       </div>
@@ -606,11 +630,11 @@ export function RouteGeneratePanel({
                       <div className="flex items-center gap-1.5">
                         <div className="flex items-center gap-1 text-[10px] text-muted-foreground">
                           <Weight className="h-3 w-3" />
-                          {a.total_weight.toFixed(1)}kg
+                          {Number(a.total_weight).toFixed(1)}kg
                         </div>
                         <div className="flex items-center gap-1 text-[10px] text-muted-foreground">
                           <Box className="h-3 w-3" />
-                          {a.total_volume.toFixed(2)}m³
+                          {Number(a.total_volume).toFixed(2)}m³
                         </div>
                         <ChevronDown className={`h-3 w-3 text-muted-foreground transition-transform ${isExpanded ? "rotate-180" : ""}`} />
                       </div>
@@ -702,11 +726,11 @@ export function RouteGeneratePanel({
                                   <div>件数</div>
                                 </div>
                                 <div className="text-center">
-                                  <div className="font-medium text-foreground">{trip.total_weight.toFixed(1)}kg</div>
+                                  <div className="font-medium text-foreground">{Number(trip.total_weight).toFixed(1)}kg</div>
                                   <div>重量</div>
                                 </div>
                                 <div className="text-center">
-                                  <div className="font-medium text-foreground">{trip.total_volume.toFixed(2)}m³</div>
+                                  <div className="font-medium text-foreground">{Number(trip.total_volume).toFixed(2)}m³</div>
                                   <div>体積</div>
                                 </div>
                                 <div className="text-center">
@@ -755,9 +779,25 @@ export function RouteGeneratePanel({
                               )}
                             </div>
                             <div className="max-h-[250px] overflow-y-auto">
+                              {phase === "confirmed" && (
+                                <div className="mb-1 flex items-center gap-1 px-1">
+                                  <button
+                                    onClick={() => setShowLoadingOrder(false)}
+                                    className={`rounded px-1.5 py-0.5 text-[9px] ${!showLoadingOrder ? "bg-primary text-primary-foreground" : "text-muted-foreground hover:bg-muted"}`}
+                                  >
+                                    配達順
+                                  </button>
+                                  <button
+                                    onClick={() => setShowLoadingOrder(true)}
+                                    className={`rounded px-1.5 py-0.5 text-[9px] ${showLoadingOrder ? "bg-primary text-primary-foreground" : "text-muted-foreground hover:bg-muted"}`}
+                                  >
+                                    積込順
+                                  </button>
+                                </div>
+                              )}
                               <div className="mb-1 grid grid-cols-[20px_20px_1fr_22px_28px_28px_40px_44px] gap-0.5 text-[9px] font-medium text-muted-foreground">
                                 <span></span>
-                                <span>#</span>
+                                <span>{showLoadingOrder && phase === "confirmed" ? "積" : "#"}</span>
                                 <span>住所</span>
                                 <span className="text-center">配</span>
                                 <span className="text-center">種別</span>
@@ -765,7 +805,10 @@ export function RouteGeneratePanel({
                                 <span className="text-right">ETA</span>
                                 <span className="text-right">時間帯</span>
                               </div>
-                              {trip.packages.map((p, pkgIdx) => {
+                              {(showLoadingOrder && phase === "confirmed"
+                                ? [...trip.packages].reverse().map((p, i) => ({ ...p, _loadingOrder: i + 1 }))
+                                : trip.packages.map((p) => ({ ...p, _loadingOrder: 0 }))
+                              ).map((p, pkgIdx) => {
                                 const RecIcon = RECIPIENT_ICON[p.recipient_type] ?? MapPin;
                                 return (
                                   <div
@@ -790,7 +833,7 @@ export function RouteGeneratePanel({
                                       )}
                                     </span>
                                     <span className="text-right font-mono">
-                                      {p.stop_order}
+                                      {showLoadingOrder && phase === "confirmed" ? p._loadingOrder : p.stop_order}
                                     </span>
                                     <span className="flex items-center gap-0.5 truncate">
                                       {p.is_redelivery && (
@@ -848,35 +891,43 @@ export function RouteGeneratePanel({
 
           <div className="space-y-3 text-xs">
             <div>
-              <div className="font-semibold mb-1">1. 便の振り分け</div>
+              <div className="font-semibold mb-1">1. 便の振り分け（タイムプール）</div>
               <ul className="ml-4 space-y-0.5 text-muted-foreground list-disc">
-                <li>午前指定（〜13:00）＋ 時間指定なし → <span className="text-foreground font-medium">1便</span></li>
-                <li>午後指定（14:00〜）＋ 夜間指定（17:00〜）→ <span className="text-foreground font-medium">2便</span></li>
-                <li>1便優先：指定なし荷物は全て1便に。容量超過分のみ2便へ</li>
+                <li>午前指定（〜13:00）＋ 時間指定なし → <span className="text-foreground font-medium">1便プール</span></li>
+                <li>午後指定（14:00〜）＋ 夜間指定（17:00〜）→ <span className="text-foreground font-medium">2便プール</span></li>
               </ul>
             </div>
 
             <div>
-              <div className="font-semibold mb-1">2. ドライバー割当</div>
+              <div className="font-semibold mb-1">2. エリアクラスタリング</div>
               <ul className="ml-4 space-y-0.5 text-muted-foreground list-disc">
-                <li>スキルレベル高いドライバーから優先</li>
-                <li>ドライバー間の荷物数を均等化（負荷バランス）</li>
+                <li>H3 Resolution 8（≈460m六角形）で荷物をグループ化</li>
+                <li>件数・重量上限を超えるクラスタは地理的に分割</li>
+                <li>大きいクラスタから優先的にドライバーへ割当</li>
+              </ul>
+            </div>
+
+            <div>
+              <div className="font-semibold mb-1">3. ドライバー割当（エリア親和性）</div>
+              <ul className="ml-4 space-y-0.5 text-muted-foreground list-disc">
+                <li>既存荷物との距離（エリア親和性）でスコアリング</li>
                 <li>車両の重量・体積制約を厳守</li>
-                <li>1便あたり最大50件</li>
+                <li>クラスタ単位で割当不可時は個別フォールバック</li>
               </ul>
             </div>
 
             <div>
-              <div className="font-semibold mb-1">3. ルート順序（貪欲法）</div>
+              <div className="font-semibold mb-1">4. ルート順序（貪欲法 + 2-opt改善）</div>
               <ul className="ml-4 space-y-0.5 text-muted-foreground list-disc">
                 <li>H3コスト行列（距離 × リスク × 渋滞）で最近傍を選択</li>
+                <li>2-opt局所探索で辺交差を解消（最大10反復）</li>
                 <li>時間指定の早着ペナルティ ×0.1 / 遅延ペナルティ ×2</li>
                 <li>工事区域は高リスク扱い（0.8以上）</li>
               </ul>
             </div>
 
             <div>
-              <div className="font-semibold mb-1">4. 配送方法の考慮</div>
+              <div className="font-semibold mb-1">5. 配送方法の考慮</div>
               <ul className="ml-4 space-y-0.5 text-muted-foreground list-disc">
                 <li>置き配 → 滞在1分、不在ペナルティなし</li>
                 <li>対面 → 滞在5分、不在率40%超はペナルティ加算</li>
@@ -884,7 +935,7 @@ export function RouteGeneratePanel({
             </div>
 
             <div>
-              <div className="font-semibold mb-1">5. シフト制約</div>
+              <div className="font-semibold mb-1">6. シフト制約</div>
               <ul className="ml-4 space-y-0.5 text-muted-foreground list-disc">
                 <li>帰着がシフト終了を超える場合、末尾の配送先を除外</li>
                 <li>便間の拠点折返し時間: 20分</li>

@@ -41,16 +41,26 @@ function toRiskScores(rows: RawRow[]): RiskScore[] {
   }));
 }
 
+const DATA_RES = 9;
+
 async function fetchFromSnowflake(date: string, hour: number | null, resolution: number): Promise<RawRow[]> {
   const hourFilter = hour !== null ? "AND HOUR = ?" : "";
   const params = hour !== null ? [date, hour] : [date];
   const sql =
-    resolution === 11
+    resolution === DATA_RES
       ? `SELECT H3_INDEX, DATE, HOUR, RISK_SCORE,
                 WEATHER_RISK, ABSENCE_RISK, BUILDING_RISK, POI_RISK
          FROM ANALYTICS.RISK_SCORES
-         WHERE DATE = ? ${hourFilter} AND H3_GET_RESOLUTION(H3_INDEX) = 11
+         WHERE DATE = ? ${hourFilter}
          ORDER BY RISK_SCORE DESC`
+    : resolution > DATA_RES
+      ? `SELECT child.VALUE::STRING AS H3_INDEX,
+                rs.DATE, rs.HOUR, rs.RISK_SCORE,
+                rs.WEATHER_RISK, rs.ABSENCE_RISK, rs.BUILDING_RISK, rs.POI_RISK
+         FROM ANALYTICS.RISK_SCORES rs,
+              LATERAL FLATTEN(INPUT => H3_CELL_TO_CHILDREN_STRING(rs.H3_INDEX, ${resolution})) child
+         WHERE rs.DATE = ? ${hourFilter}
+         ORDER BY rs.RISK_SCORE DESC`
       : `SELECT H3_CELL_TO_PARENT(H3_INDEX, ${resolution})::STRING AS H3_INDEX,
                 DATE, HOUR,
                 AVG(RISK_SCORE) AS RISK_SCORE,
@@ -59,7 +69,7 @@ async function fetchFromSnowflake(date: string, hour: number | null, resolution:
                 AVG(BUILDING_RISK) AS BUILDING_RISK,
                 AVG(POI_RISK) AS POI_RISK
          FROM ANALYTICS.RISK_SCORES
-         WHERE DATE = ? ${hourFilter} AND H3_GET_RESOLUTION(H3_INDEX) = 11
+         WHERE DATE = ? ${hourFilter}
          GROUP BY 1, 2, 3
          ORDER BY RISK_SCORE DESC`;
   return sfQuery<RawRow>(sql, params);
@@ -69,11 +79,18 @@ async function fetchFromPostgres(date: string, hour: number | null, resolution: 
   const hourFilter = hour !== null ? "AND hour = $2" : "";
   const params = hour !== null ? [date, hour] : [date];
   const sql =
-    resolution === 11
+    resolution === DATA_RES
       ? `SELECT h3_index, date, hour, risk_score,
                 weather_risk, absence_risk, building_risk, poi_risk
          FROM ft_risk_scores
-         WHERE date = $1 ${hourFilter} AND h3_get_resolution(h3_index::h3index) = 11
+         WHERE date = $1 ${hourFilter}
+         ORDER BY risk_score DESC`
+    : resolution > DATA_RES
+      ? `SELECT h3_cell_to_children(h3_index::h3index, ${resolution})::text AS h3_index,
+                date, hour, risk_score,
+                weather_risk, absence_risk, building_risk, poi_risk
+         FROM ft_risk_scores
+         WHERE date = $1 ${hourFilter}
          ORDER BY risk_score DESC`
       : `SELECT h3_cell_to_parent(h3_index::h3index, ${resolution})::text AS h3_index,
                 date, hour,
@@ -83,7 +100,7 @@ async function fetchFromPostgres(date: string, hour: number | null, resolution: 
                 AVG(building_risk) AS building_risk,
                 AVG(poi_risk) AS poi_risk
          FROM ft_risk_scores
-         WHERE date = $1 ${hourFilter} AND h3_get_resolution(h3_index::h3index) = 11
+         WHERE date = $1 ${hourFilter}
          GROUP BY 1, 2, 3
          ORDER BY risk_score DESC`;
   return pgQuery<RawRow>(sql, params);

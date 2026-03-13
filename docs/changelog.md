@@ -1,5 +1,28 @@
 # ラストワンマイル配送管理アプリ — 実装履歴
 
+## Session 7 (2026-03-13)
+
+### OSRM統合: 実道路距離・ルート形状・高速道路回避
+
+| # | 項目 | 概要 |
+|---|------|------|
+| OSRM-1 | **OSRM サイドカー構築** | `osrm/Dockerfile` — osrm-backend v5.27.1, MLD アルゴリズム, 関東BBOX (139.55,35.52,140.05,35.82) でOSMデータ抽出。`service-spec.yaml` にサイドカー追加 |
+| OSRM-2 | **距離行列・所要時間行列** | `fetchOsrmTableBatch()` + `fetchOsrmMatrix()` — OSRM `/table` API で N×N 実道路距離+所要時間。OSRM_BATCH_SIZE=100 でバッチ分割 (max-table-size=200対応) |
+| OSRM-3 | **3-tier距離フォールバック** | `travelCost()` を OSRM実道路距離 → H3コスト行列 → Haversine の3段階に拡張 |
+| OSRM-4 | **2-tier所要時間フォールバック** | `travelMinutes()` を OSRM所要時間 → dist/AVG_SPEED_KMH の2段階に拡張 |
+| OSRM-5 | **実道路ルート形状** | `fetchOsrmRoute()` + `fetchOsrmRouteSegment()` — OSRM `/route` API でGeoJSON道路形状取得。ROUTE_SEGMENT_SIZE=25 でセグメント分割 |
+| OSRM-6 | **部分フォールバック修正** | 1セグメント失敗で全ルート直線化 → 失敗セグメントのみ直線化、成功セグメントは道路形状維持 |
+| OSRM-7 | **高速道路回避 (exclude=motorway)** | OSRM全API (table/route) に `&exclude=motorway` 追加。配送トラック向け一般道ルート生成 |
+
+### 主な変更ファイル
+- `osrm/Dockerfile` — **新規** OSRMコンテナ定義
+- `osrm/build.sh` — **新規** ビルドスクリプト
+- `lastmile-app/service-spec.yaml` — OSRM サイドカー追加
+- `lastmile-app/src/app/api/plan/routes/generate/route.ts` — OSRM統合 (6関数追加、travelCost/travelMinutes拡張、exclude=motorway)
+- `lastmile-app/.env.local` — `OSRM_URL=http://localhost:5001` 追加
+
+---
+
 ## Session 6 (2026-03-11)
 
 ### UX改善: モニター画面 + 計画画面

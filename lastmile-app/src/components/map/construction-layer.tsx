@@ -1,29 +1,10 @@
 "use client";
 
 import { useMemo } from "react";
-import { H3HexagonLayer } from "@deck.gl/geo-layers";
 import { ScatterplotLayer, TextLayer } from "@deck.gl/layers";
 import type { RoadConstruction } from "@/types";
 
 export function useConstructionLayer(data: RoadConstruction[]) {
-  const hexLayer = useMemo(
-    () =>
-      new H3HexagonLayer<RoadConstruction>({
-        id: "h3-construction",
-        data,
-        getHexagon: (d) => d.h3_index,
-        getFillColor: [255, 193, 7, 120],
-        getElevation: 50,
-        extruded: true,
-        elevationScale: 1,
-        pickable: true,
-        opacity: 0.6,
-        getLineColor: [255, 193, 7, 200],
-        lineWidthMinPixels: 1,
-      }),
-    [data]
-  );
-
   const pointLayer = useMemo(
     () =>
       new ScatterplotLayer<RoadConstruction>({
@@ -64,5 +45,5 @@ export function useConstructionLayer(data: RoadConstruction[]) {
     [data]
   );
 
-  return [hexLayer, pointLayer, labelLayer];
+  return [pointLayer, labelLayer];
 }

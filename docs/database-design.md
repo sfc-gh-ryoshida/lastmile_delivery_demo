@@ -153,7 +153,7 @@ PK: `(package_id, date)` — 同一荷物の再配達 (日跨ぎ) に対応。
 
 **トリガー:** `trg_log_driver_location` — INSERT/UPDATE 時に自動で `driver_locations_history` へ INSERT。
 
-> **H3 注意:** `h3_latlng_to_cell(POINT(lat, lng), 9)` — lat が先。
+> **H3 注意:** `h3_latlng_to_cell(POINT(lng, lat), 9)` — POINT は (x=lng, y=lat) の順。Snowflake の `H3_LATLNG_TO_CELL(lat, lng, res)` とは引数順が異なる。
 
 ---
 
@@ -348,11 +348,11 @@ Flat版 (`DELIVERY_HISTORY_FLAT`): GEOGRAPHY/VARIANT カラムを除外した pg
 
 ---
 
-#### RISK_SCORES — リスクスコア (H3 R11 × 日付 × 時間帯)
+#### RISK_SCORES — リスクスコア (H3 R9 × 日付 × 時間帯)
 
 | Column | Type | Nullable | 説明 |
 |--------|------|----------|------|
-| H3_INDEX | STRING | YES | H3 R11 セル (~4,413 cells) |
+| H3_INDEX | STRING | YES | H3 R9 セル (~120 cells) |
 | DATE | DATE | YES | CLUSTER KEY |
 | HOUR | NUMBER | YES | 8-20 |
 | RISK_SCORE | FLOAT | YES | 0.0-1.0 (総合リスク) |

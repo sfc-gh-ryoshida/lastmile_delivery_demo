@@ -327,7 +327,7 @@ const h3r10 = latLngToCell(pkg.lat, pkg.lng, 10);
 const cost = costMap.get(`${fromH3r10}-${toH3r10}`);  // Snowflake H3_COST_MATRIX とマッチ
 
 // Postgres: 事故地点 → H3 R9 → grid_disk で影響範囲
-SELECT h3_grid_disk(h3_latlng_to_cell(point($1, $2), 9), $3);
+SELECT h3_grid_disk(h3_latlng_to_cell(point($2, $1), 9), $3);
 ```
 
 ### H3 が GPS座標の代わりになっている
