@@ -123,11 +123,11 @@ def pick_location_type():
 def load_routes(conn, date, driver_filter):
     cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
     cur.execute("""
-        SELECT ds.driver_id, p.lat, p.lng, p.stop_order, p.package_id, ds.status
+        SELECT ds.driver_id, ds.trip_number, ds.stop_order, p.lat, p.lng, p.package_id, ds.status
         FROM delivery_status ds
-        JOIN packages p ON p.package_id = ds.package_id AND p.date = ds.date
-        WHERE ds.date = %s
-        ORDER BY ds.driver_id, p.stop_order
+        JOIN packages p ON p.package_id = ds.package_id
+        WHERE ds.date = %s AND ds.driver_id IS NOT NULL AND ds.stop_order IS NOT NULL
+        ORDER BY ds.driver_id, ds.trip_number, ds.stop_order
     """, (date,))
     rows = cur.fetchall()
     cur.close()
@@ -408,7 +408,7 @@ def update_db(conn, drivers, date, enable_status, enable_dwell):
                 if event == "in_transit":
                     cur.execute(
                         """UPDATE delivery_status SET status = 'in_transit', updated_at = %s
-                           WHERE package_id = %s AND date = %s AND status IN ('pending', 'assigned')""",
+                           WHERE package_id = %s AND date = %s AND status IN ('pending', 'assigned', 'loaded')""",
                         (now, pkg_id, date))
                 elif event == "delivered":
                     cur.execute(

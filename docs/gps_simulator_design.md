@@ -15,6 +15,25 @@
 | 4 | `traffic_realtime` | UPSERT (渋滞H3) | 渋滞オーバーレイ | `--no-traffic` |
 | 5 | `delivery_dwell` | INSERT (滞在記録) | Dwell Time分析 | `--no-dwell` |
 
+## 前提ワークフロー
+
+シミュレーターは **計画済み（ルート確定済み）のデータに対して** 配送進捗を再現します。
+
+```
+管理画面でデモデータ生成  →  Planページでルート生成・確定  →  シミュレーター実行
+         ↓                          ↓                           ↓
+  packages テーブル         delivery_status に               GPS移動 + ステータス更新
+  delivery_status 作成      driver_id, stop_order,          (assigned → in_transit
+  (status = 'pending')      trip_number が入る               → delivered/absent)
+                            (status = 'assigned')
+```
+
+### データ準備の手順
+
+1. **管理画面 (Admin)** → デモデータ生成で対象日のpackages + delivery_statusを作成
+2. **計画画面 (Plan)** → 日付を選択 → ルート生成 → 確定（driver_id, stop_order, trip_numberが割り当てられる）
+3. **シミュレーター実行** → 確定済みルートに沿ってGPS移動 + 配送進捗がリアルタイムにDBへ書き込まれる
+
 ## 動かし方
 
 ### 前提
@@ -23,35 +42,57 @@
 - `psycopg2` (`pip install psycopg2-binary`)
 - `lastmile-app/.env.local` に Postgres 接続情報
 
-### 基本コマンド
+### シーン別コマンド
+
+#### シーン1: フルデモ（推奨）
+管理画面でデータ生成 → Plan画面でルート確定 → シミュレーター実行。
+GPS移動 + 配達ステータス + 渋滞 + 滞在記録がすべて連動。
 
 ```bash
-cd /Users/ryoshida/Desktop/env/pg_lake
+python3 tools/gps_simulator.py --date 2026-03-13 --reset --start depot --ramp 3,6,9,12 --speed 15
+```
 
-# デモ推奨: フルリセット + ランダム配置 + 段階投入 + 15倍速
-python3 tools/gps_simulator.py --reset --start random --ramp 3,6,9,12 --speed 15
+#### シーン2: GPS位置だけ動かしたい（ステータスは変えない）
+ルート確定後、Monitor画面の地図上でドライバーが動く様子だけ見せたい場合。
+delivery_statusは変更しないのでPlan画面の表示には影響しない。
 
-# デフォルト: 全12ドライバー、10倍速、depot出発、全テーブル連動
-python3 tools/gps_simulator.py
+```bash
+python3 tools/gps_simulator.py --date 2026-03-13 --no-status --no-traffic --no-dwell
+```
 
-# 高速再生
-python3 tools/gps_simulator.py --speed 30 --interval 0.5
+#### シーン3: 途中経過から見せる（ランダム散布）
+ドライバーがすでに配送中の状態から始める。depotからの出発を見せる必要がないプレゼン向け。
 
-# 特定ドライバーだけ
-python3 tools/gps_simulator.py --drivers DRV-001,DRV-003
+```bash
+python3 tools/gps_simulator.py --date 2026-03-13 --start random --speed 10
+```
 
-# GPS位置のみ (他テーブル更新なし)
-python3 tools/gps_simulator.py --no-status --no-traffic --no-dwell
+#### シーン4: 不在多発シナリオ
+不在率を高めに設定して、不在検知アラートや再配達の発生を見せたい場合。
 
-# 不在率を25%に設定
-python3 tools/gps_simulator.py --absence-rate 0.25
+```bash
+python3 tools/gps_simulator.py --date 2026-03-13 --reset --absence-rate 0.30 --speed 20
+```
+
+#### シーン5: 特定ドライバーだけ動かす
+デバッグや特定ドライバーの挙動確認用。
+
+```bash
+python3 tools/gps_simulator.py --date 2026-03-13 --drivers DRV-001,DRV-003
+```
+
+#### シーン6: 高速再生
+短時間で全配送を完了させたい場合。
+
+```bash
+python3 tools/gps_simulator.py --date 2026-03-13 --speed 30 --interval 0.5
 ```
 
 ### パラメータ一覧
 
 | パラメータ | デフォルト | 説明 |
 |-----------|----------|------|
-| `--date` | `2026-03-12` | シミュレーション対象日 (**※下記注意**) |
+| `--date` | 今日の日付 | シミュレーション対象日 |
 | `--interval` | `1` | DB更新間隔 (秒) |
 | `--speed` | `10` | シミュレーション速度倍率 |
 | `--start` | `depot` | 初期位置: `depot` or `random` |
@@ -65,34 +106,36 @@ python3 tools/gps_simulator.py --absence-rate 0.25
 
 ### `--date` と日付依存について
 
-シミュレータは起動時に `packages` + `delivery_status` テーブルから **指定日付のルートデータを読み込む**。
-そのため、**データが存在する日付でないと動かない** (`No routes found` で終了する)。
+シミュレータは起動時に `delivery_status` + `packages` テーブルから **指定日付のルート確定済みデータを読み込む**。
+`delivery_status` に `driver_id` と `stop_order` が入っていないと動かない（`No routes found` で終了する）。
 
 ```sql
--- どの日付にデータがあるか確認
-SELECT date, COUNT(*) AS packages FROM packages GROUP BY date ORDER BY date;
+-- どの日付にルート確定済みデータがあるか確認
+SELECT ds.date, COUNT(*) AS total, COUNT(ds.driver_id) AS assigned, COUNT(ds.stop_order) AS has_route
+FROM delivery_status ds
+GROUP BY ds.date ORDER BY ds.date DESC;
 ```
 
-| ケース | 動作 |
-|--------|------|
-| `--date 2026-03-12` (デフォルト) | ルートデータあり → 正常動作 |
-| `--date 2026-03-13` (データなし) | `No routes found for 2026-03-13` で終了 |
+| 状態 | 結果 |
+|------|------|
+| デモデータ生成のみ（ルート未確定） | `assigned = 0`, `has_route = 0` → **動かない** |
+| ルート確定済み | `assigned > 0`, `has_route > 0` → **動く** |
 
-#### 別の日付で動かす手順
+### --reset の対象
 
-1. **管理画面 (Admin) でデモデータ生成** → 対象日付の `packages` + `delivery_status` が作られる
-2. **シミュレータを同じ日付で起動**
-
-```bash
-# 例: 管理画面で 2026-03-15 のデモデータを生成した後
-python3 tools/gps_simulator.py --date 2026-03-15 --reset --speed 15
-```
+| テーブル | リセット内容 |
+|---------|------------|
+| `driver_locations` | 初期位置 (depot or random) に更新 |
+| `delivery_status` | ステータスを `assigned` に戻し、completed_at/is_absent/attempt_countクリア |
+| `delivery_dwell` | 対象日・対象ドライバーのレコード削除 |
+| `traffic_realtime` | 直近2時間のレコード削除 |
+| `driver_locations_history` | 直近1時間のレコード削除 |
 
 ### 画面の見方
 
 ```
 ============================================================================
- Delivery Simulator  Date: 2026-03-12  Speed: 15.0x  Tick: 42  Elapsed: 1m05s
+ Delivery Simulator  Date: 2026-03-13  Speed: 15.0x  Tick: 42  Elapsed: 1m05s
  Drivers: 6 active / 6 wait / 0 done    28 delivered  4 absent  460 remaining  [6%]
  [status+traffic+dwell]  absence=12%  Traffic: 3 congested cells
 ----------------------------------------------------------------------------
@@ -115,31 +158,10 @@ python3 tools/gps_simulator.py --date 2026-03-15 --reset --speed 15
 | `x1` (赤) | 不在件数 |
 | `Traffic: N congested cells` | 渋滞レベル2以上のH3セル数 |
 
-### --reset の対象
+### ステータス遷移
 
-| テーブル | リセット内容 |
-|---------|------------|
-| `driver_locations` | 初期位置 (depot or random) に更新 |
-| `delivery_status` | 全ステータスを `pending` に、completed_at/is_absent/attempt_countクリア |
-| `delivery_dwell` | 対象日・対象ドライバーのレコード削除 |
-| `traffic_realtime` | 直近2時間のレコード削除 |
-| `driver_locations_history` | 直近1時間のレコード削除 |
-
-### デモシナリオ例
-
-**シナリオ1: 朝の出発 (段階的)**
-```bash
-python3 tools/gps_simulator.py --reset --start depot --ramp 3,6,9,12 --speed 15
 ```
-
-**シナリオ2: 途中経過 (ランダム散布)**
-```bash
-python3 tools/gps_simulator.py --start random --speed 10
-```
-
-**シナリオ3: 不在多発シナリオ**
-```bash
-python3 tools/gps_simulator.py --reset --absence-rate 0.30 --speed 20
+assigned/loaded → (移動開始) → in_transit → (到着+滞在完了) → delivered (88%) or absent (12%)
 ```
 
 ### 確認用SQL
@@ -149,13 +171,13 @@ python3 tools/gps_simulator.py --reset --absence-rate 0.30 --speed 20
 SELECT * FROM driver_locations ORDER BY driver_id;
 
 -- 配達進捗
-SELECT status, count(*) FROM delivery_status WHERE date = '2026-03-12' GROUP BY status ORDER BY status;
+SELECT status, count(*) FROM delivery_status WHERE date = '2026-03-13' GROUP BY status ORDER BY status;
 
 -- 渋滞状況
 SELECT h3_index::text, congestion_level, speed_ratio FROM traffic_realtime WHERE datetime >= NOW() - INTERVAL '2 hours' ORDER BY congestion_level DESC;
 
 -- 滞在記録
-SELECT driver_id, count(*), avg(dwell_seconds)::int avg_sec FROM delivery_dwell WHERE date = '2026-03-12' GROUP BY driver_id ORDER BY driver_id;
+SELECT driver_id, count(*), avg(dwell_seconds)::int avg_sec FROM delivery_dwell WHERE date = '2026-03-13' GROUP BY driver_id ORDER BY driver_id;
 
 -- 軌跡数
 SELECT driver_id, count(*) FROM driver_locations_history WHERE recorded_at > NOW() - INTERVAL '1 hour' GROUP BY driver_id ORDER BY driver_id;
@@ -165,7 +187,8 @@ SELECT driver_id, count(*) FROM driver_locations_history WHERE recorded_at > NOW
 
 | 症状 | 対処 |
 |------|------|
-| `No routes found` | `--date` の日付にルートデータが存在するか確認 |
+| `No routes found` | 指定日付のルートが確定済みか確認。管理画面でデータ生成 → Plan画面でルート確定が必要 |
+| `ModuleNotFoundError: psycopg2` | `pip install psycopg2-binary`。`.venv`が有効な場合はそのvenv内で実行すること |
 | `connection refused` | `.env.local` の POSTGRES_HOST/USER/PASSWORD を確認 |
 | 動きが遅い | `--speed 20` 以上にするか `--interval 0.5` にする |
 | 画面が崩れる | ターミナル幅を76文字以上にする |
@@ -181,11 +204,6 @@ SELECT driver_id, count(*) FROM driver_locations_history WHERE recorded_at > NOW
 - 到着判定: 距離 < 30m
 - 滞在時間: 5-20秒 (デモ向けに短縮)
 - ルート完了後: depotに帰還
-
-### ステータス遷移
-```
-pending/assigned → (移動開始) → in_transit → (到着+滞在完了) → delivered (88%) or absent (12%)
-```
 
 ### 渋滞ロジック
 - 5tickごとにドライバー位置のH3セルを集計
