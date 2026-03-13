@@ -6,12 +6,12 @@ spec:
       HOSTNAME: "0.0.0.0"
       PORT: "8080"
       NODE_ENV: production
-      SNOWFLAKE_ACCOUNT: SFSEAPAC-FSI_JAPAN
-      SNOWFLAKE_USER: FSI_JAPAN
-      SNOWFLAKE_WAREHOUSE: RYOSHIDA_WH
+      SNOWFLAKE_ACCOUNT: SFSEAPAC-YNAKAMURA_AWS_US_WEST
+      SNOWFLAKE_USER: RYU
+      SNOWFLAKE_WAREHOUSE: APP_WH
       SNOWFLAKE_DATABASE: LASTMILE_DB
       SNOWFLAKE_SCHEMA: ANALYTICS
-      POSTGRES_HOST: fkjkwu4nm5dk3k6jgvarag67eu.sfseapac-fsi-japan.us-west-2.aws.postgres.snowflake.app
+      POSTGRES_HOST: fnuco4bppbhodms2rww3wo5jbq.sfseapac-ynakamura-aws-us-west.us-west-2.aws.postgres.snowflake.app
       POSTGRES_PORT: "5432"
       POSTGRES_DB: postgres
       POSTGRES_USER: snowflake_admin
@@ -24,7 +24,7 @@ spec:
       secretKeyRef: secret_string
       envVarName: SNOWFLAKE_PAT
     - snowflakeSecret: LASTMILE_DB.SPCS.POSTGRES_PASSWORD_SECRET
-      secretKeyRef: password
+      secretKeyRef: secret_string
       envVarName: POSTGRES_PASSWORD
     - snowflakeSecret: LASTMILE_DB.SPCS.MAPBOX_TOKEN_SECRET
       secretKeyRef: secret_string
